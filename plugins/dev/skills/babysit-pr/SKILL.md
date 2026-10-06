@@ -13,6 +13,7 @@ allowed-tools:
   - Grep
   - Glob
   - Agent
+disallowed-tools: AskUserQuestion
 ---
 
 # babysit-pr
