@@ -53,6 +53,12 @@ owners and members it trusts in `~/.claude/settings.json` on each machine:
 
 Requirements: `gh` (authenticated), `jq`, `git`.
 
+**Permissions.** The skill pre-approves its own scripts, `git` and `gh`, but
+Claude Code clears a skill's `allowed-tools` grant when you send your next
+message, and the loop also runs your repo's build and test commands. For an
+unattended run, use auto or bypass permission mode, or allow `Bash(git *)`,
+`Bash(gh *)` and your test commands in `~/.claude/settings.json`.
+
 ## Contribute
 
 See [AGENTS.md](AGENTS.md). Run `bin/ci` before pushing.
