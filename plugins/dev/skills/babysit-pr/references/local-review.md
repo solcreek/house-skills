@@ -34,8 +34,8 @@ Report only what should change a merge decision:
 Do not report formatting, naming, "consider" refactors, unmeasured performance,
 or anything outside the range. Do not edit files, commit, or push.
 
-Print exactly this and nothing after it — one JSON object per line, at most 10,
-highest severity first; nothing between the markers if there are no findings:
+Print exactly this and nothing after it — one JSON object per line, highest
+severity first; nothing between the markers if there are no findings:
 
 <<findings
 {"path": "<repo-relative>", "line": <line in the new file>, "type": "bug|security|test|doc|convention", "severity": "high|moderate|low", "body": "<the claim, the evidence you read, the fix>"}
