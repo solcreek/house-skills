@@ -24,7 +24,8 @@ base=$(jq -nc --arg head "$HEAD" '{
        mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
        author: {__typename: "User", login: "me"}, authorAssociation: "MEMBER",
        labels: {nodes: []}, reviewRequests: {nodes: []}},
-  reviews: [], comments: [], threads: [], timeline: [], checks: []}')
+  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [],
+  now: 1791288000}')
 
 user() { echo "{\"__typename\": \"User\", \"login\": \"$1\"}"; }
 bot() { echo "{\"__typename\": \"Bot\", \"login\": \"$1\"}"; }
@@ -40,7 +41,9 @@ run() {
   jq -c '[{data: {repository: {pullRequest: {timelineItems: {nodes: .timeline}}}}}]' <<<"$w" > "$tmp/timeline"
   jq -c 'if .checks == null then [{data: {repository: {object: {statusCheckRollup: null}}}}]
          else [{data: {repository: {object: {statusCheckRollup: {contexts: {nodes: .checks}}}}}}] end' <<<"$w" > "$tmp/checks"
+  jq -c '.runs' <<<"$w" > "$tmp/runs"
   jq -n -c -f "$jqfile" \
+    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" \
     --arg orgs "$(jq -r .orgs <<<"$w")" --arg bots "$(jq -r .bots <<<"$w")" \
     --slurpfile head "$tmp/head" --slurpfile reviews "$tmp/reviews" --slurpfile comments "$tmp/comments" \
     --slurpfile threads "$tmp/threads" --slurpfile timeline "$tmp/timeline" --slurpfile checks "$tmp/checks"
@@ -69,6 +72,15 @@ thread() { # thread ID RESOLVED COMMENT-JSON...
   local id=$1 resolved=$2; shift 2
   local cs; cs=$(printf '%s\n' "$@" | jq -sc .)
   echo "{\"id\": \"$id\", \"isResolved\": $resolved, \"isOutdated\": false, \"path\": \"a.rb\", \"line\": 3, \"comments\": {\"totalCount\": $(jq length <<<"$cs"), \"nodes\": $cs}}"
+}
+asked() { # asked DAY — Copilot requested at 2026-10-0DAY
+  echo "{\"__typename\": \"ReviewRequestedEvent\", \"createdAt\": \"2026-10-0$1T00:00:00Z\", \"requestedReviewer\": $COPILOT}"
+}
+unasked() { # unasked DAY — the request removed at 2026-10-0DAY
+  echo "{\"__typename\": \"ReviewRequestRemovedEvent\", \"createdAt\": \"2026-10-0$1T00:00:00Z\", \"requestedReviewer\": $COPILOT}"
+}
+copilot_run() { # copilot_run STATUS CONCLUSION CREATED UPDATED
+  echo "{\"path\": \"dynamic/agents/copilot-pull-request-reviewer\", \"status\": \"$1\", \"conclusion\": $2, \"created_at\": \"$3\", \"updated_at\": \"$4\", \"html_url\": \"run-url\"}"
 }
 run_check() { # run_check NAME STATUS CONCLUSION STARTED
   echo "{\"__typename\": \"CheckRun\", \"name\": \"$1\", \"status\": \"$2\", \"conclusion\": $3, \"startedAt\": \"$4\", \"detailsUrl\": \"d\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}, \"workflowRun\": {\"databaseId\": 9, \"workflow\": {\"name\": \"CI\"}}}}"
@@ -183,11 +195,35 @@ check "a thread too long to read whole is withheld" \
   '.threads == [] and (.withheld | length) == 1'
 
 echo "== copilot"
+# now = 1791288000 = 2026-10-06T12:00:00Z
 check "a request with no review yet is pending" \
-  ".timeline = [{requestedReviewer: $COPILOT}]" '.copilot.pending == 1 and .copilot.involved and (.settled | not)'
-check "a review on the head clears pending and is not stale" \
-  ".timeline = [{requestedReviewer: $COPILOT}] | .reviews = [$(review r1 "$COPILOT" NONE COMMENTED '')]" \
+  ".timeline = [$(asked 1)]" '.copilot.pending == 1 and .copilot.involved and (.settled | not)'
+check "a review after the request clears pending and is not stale" \
+  ".timeline = [$(asked 1)] | .reviews = [$(review r1 "$COPILOT" NONE COMMENTED '' "$HEAD" 2)]" \
   '.copilot.pending == 0 and (.copilot.stale | not) and .settled'
+check "a second request after the first review is pending again" \
+  ".timeline = [$(asked 1), $(asked 3)] | .reviews = [$(review r1 "$COPILOT" NONE COMMENTED '' "$OLD" 2)]" \
+  '.copilot.pending == 1'
+check "a removed request is not pending" \
+  ".timeline = [$(asked 1), $(unasked 2)]" '.copilot.pending == 0 and .settled and .copilot.involved'
+check "a failed review run after the request ends the wait" \
+  ".timeline = [$(asked 1)] | .runs = [$(copilot_run completed '"failure"' 2026-10-01T00:01:00Z 2026-10-01T00:03:00Z)]" \
+  '.copilot.pending == 0 and (.copilot.no_review | test("failure")) and .copilot.run_url == "run-url"'
+check "a run that just succeeded is still given time to post its review" \
+  ".timeline = [$(asked 6)] | .runs = [$(copilot_run completed '"success"' 2026-10-06T11:50:00Z 2026-10-06T11:55:00Z)]" \
+  '.copilot.pending == 1 and .copilot.no_review == null'
+check "a run that succeeded long ago with no review ends the wait" \
+  ".timeline = [$(asked 6)] | .runs = [$(copilot_run completed '"success"' 2026-10-06T10:00:00Z 2026-10-06T10:05:00Z)]" \
+  '.copilot.pending == 0 and (.copilot.no_review | test("no review"))'
+check "a running review run keeps it pending" \
+  ".timeline = [$(asked 6)] | .runs = [$(copilot_run in_progress null 2026-10-06T11:00:00Z 2026-10-06T11:00:00Z)]" \
+  '.copilot.pending == 1'
+check "a failed run from before the request is ignored" \
+  ".timeline = [$(asked 6)] | .runs = [$(copilot_run completed '"failure"' 2026-10-05T00:00:00Z 2026-10-05T00:05:00Z)]" \
+  '.copilot.pending == 1'
+check "another workflow's run is ignored" \
+  ".timeline = [$(asked 6)] | .runs = [$(copilot_run completed '"failure"' 2026-10-06T11:00:00Z 2026-10-06T11:01:00Z | jq -c '.path = "other"')]" \
+  '.copilot.pending == 1'
 check "a review on an older commit is stale" \
   ".reviews = [$(review r1 "$COPILOT" NONE COMMENTED '' "$OLD")]" ".copilot.stale and .copilot.reviewed_sha == \"$OLD\""
 check "the newest Copilot review decides the reviewed sha" \

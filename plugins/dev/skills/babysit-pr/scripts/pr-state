@@ -63,8 +63,10 @@ if [ -n "$head_sha" ]; then
   page comments.json comments "" "id url body createdAt $who"
   page threads.json reviewThreads "" "id isResolved isOutdated path line
     comments(first: 100) { totalCount nodes { id url body createdAt $who } }"
-  page timeline.json timelineItems 'itemTypes: [REVIEW_REQUESTED_EVENT],' \
-    '... on ReviewRequestedEvent { requestedReviewer { __typename ... on Bot { login } } }'
+  page timeline.json timelineItems 'itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT],' \
+    '__typename
+     ... on ReviewRequestedEvent { createdAt requestedReviewer { __typename ... on Bot { login } } }
+     ... on ReviewRequestRemovedEvent { createdAt requestedReviewer { __typename ... on Bot { login } } }'
   gh api graphql --paginate --slurp -F owner="${repo%%/*}" -F name="${repo#*/}" -f oid="$head_sha" \
     -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!, \$endCursor: String) {
     repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit {
@@ -74,6 +76,13 @@ if [ -n "$head_sha" ]; then
           ... on CheckRun { name status conclusion startedAt detailsUrl
             checkSuite { app { slug } workflowRun { databaseId workflow { name } } } }
           ... on StatusContext { context state targetUrl createdAt } } } } } } } }" > "$tmp/checks.json"
+
+  # Copilot's review runs as an Actions run on the head branch. Best effort:
+  # a repo without Actions access just has no runs to consult.
+  branch=$(jq -r '.data.repository.pullRequest.headRefName' "$tmp/head0.json")
+  gh api -X GET "repos/$repo/actions/runs" -f branch="$branch" -f event=dynamic -f per_page=20 \
+    --jq '.workflow_runs | map({path, status, conclusion, created_at, updated_at, html_url})' \
+    > "$tmp/runs.json" 2>/dev/null || echo '[]' > "$tmp/runs.json"
 
   # Read the head again: a push, review or comment that landed mid-read means
   # the pieces describe different moments, so nothing is judged on them.
@@ -85,7 +94,7 @@ if [ -n "$head_sha" ]; then
   fi
 else
   cp "$tmp/head0.json" "$tmp/head.json"
-  for f in reviews comments threads timeline checks; do echo '[]' > "$tmp/$f.json"; done
+  for f in reviews comments threads timeline checks runs; do echo '[]' > "$tmp/$f.json"; done
 fi
 
 jq -n -c -f "$here/state.jq" \
@@ -95,7 +104,9 @@ jq -n -c -f "$here/state.jq" \
   --slurpfile comments "$tmp/comments.json" \
   --slurpfile threads "$tmp/threads.json" \
   --slurpfile timeline "$tmp/timeline.json" \
-  --slurpfile checks "$tmp/checks.json" > "$tmp/out.json"
+  --slurpfile checks "$tmp/checks.json" \
+  --slurpfile runs "$tmp/runs.json" \
+  --argjson now "$(date +%s)" > "$tmp/out.json"
 
 cat "$tmp/out.json"
 jq -e '.refused == null' "$tmp/out.json" >/dev/null || exit 3

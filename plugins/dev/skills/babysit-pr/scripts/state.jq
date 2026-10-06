@@ -1,8 +1,9 @@
 # Turns the raw GraphQL pages pr-state fetched into the one JSON object the
 # skill reads. Everything that decides whose text reaches the agent lives here.
 #
-# Inputs (--slurpfile): $head, $reviews, $comments, $threads, $timeline, $checks
+# Inputs (--slurpfile): $head, $reviews, $comments, $threads, $timeline, $checks, $runs
 # Inputs (--arg):       $orgs, $bots — comma-separated, from the environment only
+# Inputs (--argjson):   $now — epoch seconds
 #
 # Trust: a person is inside when the repo belongs to one of $orgs and GitHub
 # calls them OWNER or MEMBER there; on any other repo only the token's own
@@ -86,15 +87,36 @@ def checks:
      pending: map(select(.pending) | .name),
      passed: map(select((.pending or .failed) | not)) | length};
 
+# Copilot is working when its newest review request is newer than both its
+# newest review and any removal of the request. reviewRequests cannot say this:
+# it empties the moment Copilot picks a request up, long before it posts.
+#
+# The review itself runs as an Actions run (path below). A run that finished
+# after the request without a review being posted means no review is coming:
+# failed or cancelled at once, succeeded after a grace period, since the
+# review can land a little after the run completes.
+def copilot_run_path: "dynamic/agents/copilot-pull-request-reviewer";
+def review_grace: 600;
 def copilot_state:
   (nodes($reviews; .data.repository.pullRequest.reviews) | map(select(login == copilot)) | sort_by(.createdAt)) as $rv
-  | ([nodes($timeline; .data.repository.pullRequest.timelineItems)[]
-      | select(.requestedReviewer.login? == copilot)] | length) as $req
-  | {involved: ($req > 0 or ($rv | length) > 0),
+  | [nodes($timeline; .data.repository.pullRequest.timelineItems)[]
+     | select(.requestedReviewer.login? == copilot)] as $ev
+  | ($ev | map(select(.__typename == "ReviewRequestedEvent") | .createdAt) | max) as $asked
+  | ([($rv | last | .createdAt), ($ev | map(select(.__typename == "ReviewRequestRemovedEvent") | .createdAt) | max)]
+     | map(select(. != null)) | max) as $answered
+  | ($asked != null and ($answered == null or $asked > $answered)) as $open
+  | ([$runs[0][] | select(.path == copilot_run_path and $asked != null and .created_at >= $asked)]
+     | sort_by(.created_at) | last) as $run
+  | (if $open and $run != null and $run.status == "completed" then
+       if $run.conclusion != "success" then "the Copilot review run ended \($run.conclusion) without posting a review"
+       elif ($now - ($run.updated_at | fromdateiso8601)) > review_grace then "the Copilot review run succeeded \(review_grace / 60) minutes ago but posted no review"
+       else null end
+     else null end) as $gave_up
+  | {involved: (($ev | length) > 0 or ($rv | length) > 0),
      reviews: ($rv | length),
-     # reviewRequests empties the moment Copilot picks a request up, long before
-     # it posts; only requests minus reviews says it is still working.
-     pending: ([$req - ($rv | length), 0] | max),
+     pending: (if $open and $gave_up == null then 1 else 0 end),
+     no_review: $gave_up,
+     run_url: $run.html_url?,
      reviewed_sha: ($rv | last | .commit.oid? // null)}
   | . + {stale: (.involved and .reviewed_sha != pr.headRefOid)};
 

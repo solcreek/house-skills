@@ -155,7 +155,9 @@ When `work == 0` and `settled`:
    **3** times: `$S/request-copilot $R $N`, then wait. Exit 5 means Copilot
    is not available on this repo — carry on without it. Never request Copilot
    on a PR it has not reviewed before: its reviews are billed, and the local
-   review stands in.
+   review stands in. If `copilot.no_review` is set, Copilot's last run ended
+   without a review: say so in the summary (with `copilot.run_url`); that
+   request still counts toward the 3.
 4. If `done` and nothing above applies → finish.
 
 ## Budgets and stops
