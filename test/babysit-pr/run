@@ -83,8 +83,8 @@ unasked() { # unasked DAY — the request removed at 2026-10-0DAY
 copilot_run() { # copilot_run STATUS CONCLUSION CREATED UPDATED
   echo "{\"path\": \"dynamic/agents/copilot-pull-request-reviewer\", \"status\": \"$1\", \"conclusion\": $2, \"created_at\": \"$3\", \"updated_at\": \"$4\", \"html_url\": \"run-url\"}"
 }
-run_check() { # run_check NAME STATUS CONCLUSION STARTED
-  echo "{\"__typename\": \"CheckRun\", \"name\": \"$1\", \"status\": \"$2\", \"conclusion\": $3, \"startedAt\": \"$4\", \"detailsUrl\": \"d\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}, \"workflowRun\": {\"databaseId\": 9, \"workflow\": {\"name\": \"CI\"}}}}"
+run_check() { # run_check NAME STATUS CONCLUSION STARTED [EVENT]
+  echo "{\"__typename\": \"CheckRun\", \"name\": \"$1\", \"status\": \"$2\", \"conclusion\": $3, \"startedAt\": \"$4\", \"detailsUrl\": \"d\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}, \"workflowRun\": {\"databaseId\": 9, \"event\": \"${5:-pull_request}\", \"workflow\": {\"name\": \"CI\"}}}}"
 }
 
 ME=$(user me); ALICE=$(user alice); EVE=$(user eve)
@@ -105,6 +105,9 @@ check "a re-run that passed hides the older failure" \
 check "a newer failure wins over an older pass" \
   ".checks = [$(run_check test COMPLETED '"SUCCESS"' 2026-10-01T00:00:00Z), $(run_check test COMPLETED '"FAILURE"' 2026-10-02T00:00:00Z)]" \
   '.checks.failing[0].name == "CI / test" and .checks.failing[0].run_id == 9 and .work == 1'
+check "a push run's failure is not hidden by a later pull_request pass" \
+  ".checks = [$(run_check test COMPLETED '"FAILURE"' 2026-10-01T00:00:00Z push), $(run_check test COMPLETED '"SUCCESS"' 2026-10-02T00:00:00Z pull_request)]" \
+  '.checks.failing == [{name: "CI / test", conclusion: "FAILURE", event: "push", run_id: 9, url: "d"}] and .checks.passed == 1 and .work == 1'
 check "a running check keeps the PR unsettled" \
   ".checks = [$(run_check build IN_PROGRESS null 2026-10-01T00:00:00Z)]" \
   '.checks.pending == ["CI / build"] and (.settled | not)'

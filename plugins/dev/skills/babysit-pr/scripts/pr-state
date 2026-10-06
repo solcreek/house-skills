@@ -74,7 +74,7 @@ if [ -n "$head_sha" ]; then
         pageInfo { hasNextPage endCursor }
         nodes { __typename
           ... on CheckRun { name status conclusion startedAt detailsUrl
-            checkSuite { app { slug } workflowRun { databaseId workflow { name } } } }
+            checkSuite { app { slug } workflowRun { databaseId event workflow { name } } } }
           ... on StatusContext { context state targetUrl createdAt } } } } } } } }" > "$tmp/checks.json"
 
   # Copilot's review runs as an Actions run on the head branch. Best effort:

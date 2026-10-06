@@ -66,7 +66,9 @@ def refusal:
 
 # One entry per check, newest attempt wins: the rollup keeps superseded and
 # re-run attempts on the same commit, and an old failure must not outlive its
-# re-run.
+# re-run. A workflow triggered by both push and pull_request runs the same
+# check twice on one commit; those are separate checks, keyed by event, so a
+# pass under one never hides a failure under the other.
 def checks:
   nodes($checks; .data.repository.object.statusCheckRollup.contexts)
   | map(if .__typename == "CheckRun" then
@@ -75,16 +77,17 @@ def checks:
            pending: (.status != "COMPLETED"),
            failed: (.status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"))),
            conclusion: (.conclusion // .status),
+           event: .checkSuite.workflowRun.event,
            run_id: .checkSuite.workflowRun.databaseId,
            url: .detailsUrl}
         else
           {name: .context, at: (.createdAt // ""),
            pending: (.state | IN("PENDING", "EXPECTED")),
            failed: (.state | IN("ERROR", "FAILURE")),
-           conclusion: .state, run_id: null, url: .targetUrl}
+           conclusion: .state, event: null, run_id: null, url: .targetUrl}
         end)
-  | group_by(.name) | map(sort_by(.at) | last)
-  | {failing: map(select(.failed) | del(.at, .pending, .failed)),
+  | group_by([.name, .event]) | map(sort_by(.at) | last)
+  | {failing: map(select(.failed) | del(.at, .pending, .failed) | if .event == null then del(.event) else . end),
      pending: map(select(.pending) | .name),
      passed: map(select((.pending or .failed) | not)) | length};
 
