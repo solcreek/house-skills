@@ -61,7 +61,8 @@ once, then stop.
    Makefile / Cargo.toml, note the narrowest build, lint and test commands, and
    the commit style from `git log --oneline -20`.
 5. If `BABYSIT_ORGS` is empty, say once that only your own comments and review
-   bots are trusted (see README), and continue.
+   bots are trusted until the user sets it under `env` in
+   `~/.claude/settings.json`, and continue.
 
 ## The cycle
 
