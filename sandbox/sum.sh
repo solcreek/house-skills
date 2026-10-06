@@ -3,6 +3,6 @@
 set -euo pipefail
 total=0
 for n in "$@"; do
-  total=$((total - n))
+  total=$((total + n))
 done
 echo "$total"
