@@ -65,6 +65,13 @@ once, then stop.
 5. If `BABYSIT_ORGS` is empty, say once that only your own comments and review
    bots are trusted until the user sets it under `env` in
    `~/.claude/settings.json`, and continue.
+6. **First Copilot review.** If `copilot.first_request` (Copilot has not been
+   asked, and no ruleset on the base branch asks it by itself), run
+   `$S/request-copilot $R $N` now so it reviews alongside the first cycle; it
+   counts toward the 3 below. Exit 5 (Copilot not available on this repo) or
+   6 (`BABYSIT_COPILOT=never`) → carry on with the local review only. If
+   `copilot.auto` is null, the rules could not be read: do not request, and
+   say so in the final report.
 
 ## The cycle
 
@@ -154,10 +161,10 @@ When `work == 0` and `settled`:
    green on this head, and the fix is in it).
 3. **Copilot confirmation.** If `copilot.involved` and `copilot.stale`, your
    local review covered the head, and this run has asked Copilot fewer than
-   **3** times: `$S/request-copilot $R $N`, then wait. Exit 5 means Copilot
-   is not available on this repo — carry on without it. Never request Copilot
-   on a PR it has not reviewed before: its reviews are billed, and the local
-   review stands in. If `copilot.no_review` is set, Copilot's last run ended
+   **3** times: `$S/request-copilot $R $N`, then wait. Exit 5 or 6 → carry
+   on without it. Outside setup step 6, never request Copilot on a PR it has
+   not reviewed: its reviews are billed, and the local review stands in.
+   If `copilot.no_review` is set, Copilot's last run ended
    without a review: say so in the summary (with `copilot.run_url`); that
    request still counts toward the 3.
 4. If `done` and nothing above applies → finish.
@@ -182,7 +189,8 @@ Stop with the final report when any of these hits:
 Output only:
 
 - Status: `done`, `needs a person`, or `stopped: <reason>`
-- Cycles, runtime, Copilot requests, local reviews
+- Cycles, runtime, Copilot requests (and whether the repo reviews
+  automatically), local reviews
 - Fixed / declined / flagged counts by source (threads, review bodies,
   comments, CI, local review); commits as `<sha> <subject>`
 - Open items with links and who must decide; withheld links

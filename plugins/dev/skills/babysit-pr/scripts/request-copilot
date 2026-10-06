@@ -10,8 +10,12 @@
 # for the repo or plan) and silently drops it, so the request only counts once
 # pr-state shows it pending.
 #
+# BABYSIT_COPILOT=never turns requests off (reviews are billed); Copilot
+# still reviews where a repo ruleset asks it to.
+#
 # Exit 0 on success, 5 when the request was accepted but never showed up
-# (Copilot is unavailable here), 1 on any other failure, 2 usage.
+# (Copilot is unavailable here), 6 when BABYSIT_COPILOT=never, 1 on any other
+# failure, 2 usage.
 set -euo pipefail
 
 usage="usage: request-copilot OWNER/REPO NUMBER"
@@ -19,6 +23,12 @@ repo=${1:?$usage}
 number=${2:?$usage}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 attempts=${BABYSIT_CONFIRM_ATTEMPTS:-6}
+
+case ${BABYSIT_COPILOT:-} in
+  "") ;;
+  never) echo "request-copilot: BABYSIT_COPILOT=never; not requesting Copilot" >&2; exit 6 ;;
+  *) echo "request-copilot: BABYSIT_COPILOT must be empty or 'never'" >&2; exit 2 ;;
+esac
 
 pending() {
   local out rc=0

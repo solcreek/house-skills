@@ -51,6 +51,13 @@ owners and members it trusts in `~/.claude/settings.json` on each machine:
 - PRs authored outside those orgs, from forks, or labeled `outside-text` are
   refused.
 
+**Copilot review.** Where a ruleset on the base branch already reviews new PRs
+with Copilot, the skill waits for that review. Where none does, it asks Copilot
+for one review itself. Either way it asks again (up to 3 times a run) after it
+pushes fixes. Copilot reviews are billed per review, so set
+`"BABYSIT_COPILOT": "never"` to stop the skill from asking at all; rulesets
+still trigger their own reviews.
+
 Requirements: `gh` (authenticated), `jq`, `git`.
 
 **Permissions.** The skill pre-approves its own scripts, `git` and `gh`, but

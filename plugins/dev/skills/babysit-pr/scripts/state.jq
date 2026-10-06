@@ -1,7 +1,8 @@
 # Turns the raw GraphQL pages pr-state fetched into the one JSON object the
 # skill reads. Everything that decides whose text reaches the agent lives here.
 #
-# Inputs (--slurpfile): $head, $reviews, $comments, $threads, $timeline, $checks, $runs
+# Inputs (--slurpfile): $head, $reviews, $comments, $threads, $timeline, $checks, $runs,
+#                       $rules (the base branch's rules, or null when unreadable)
 # Inputs (--arg):       $orgs, $bots — comma-separated, from the environment only
 # Inputs (--argjson):   $now — epoch seconds
 #
@@ -97,6 +98,10 @@ def checks:
 # review can land a little after the run completes.
 def copilot_run_path: "dynamic/agents/copilot-pull-request-reviewer";
 def review_grace: 600;
+# A copilot_code_review rule on the base branch means GitHub requests Copilot
+# on every new PR by itself; null when the rules could not be read.
+def copilot_auto: if $rules[0] == null then null
+  else any($rules[0][]?; .type == "copilot_code_review") end;
 def copilot_state:
   (nodes($reviews; .data.repository.pullRequest.reviews) | map(select(login == copilot)) | sort_by(.createdAt)) as $rv
   | [nodes($timeline; .data.repository.pullRequest.timelineItems)[]
@@ -118,7 +123,9 @@ def copilot_state:
      no_review: $gave_up,
      run_url: $run.html_url?,
      reviewed_sha: ($rv | last | .commit.oid? // null)}
-  | . + {stale: (.involved and .reviewed_sha != pr.headRefOid)};
+  | . + {stale: (.involved and .reviewed_sha != pr.headRefOid), auto: copilot_auto}
+  # The repo does not ask Copilot by itself, so the agent asks once.
+  | . + {first_request: ((.involved | not) and .auto == false)};
 
 def threads:
   nodes($threads; .data.repository.pullRequest.reviewThreads) | map(select(.isResolved | not))

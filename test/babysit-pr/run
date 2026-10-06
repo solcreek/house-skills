@@ -24,7 +24,7 @@ base=$(jq -nc --arg head "$HEAD" '{
        mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
        author: {__typename: "User", login: "me"}, authorAssociation: "MEMBER",
        labels: {nodes: []}, reviewRequests: {nodes: []}},
-  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [],
+  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [], rules: [],
   now: 1791288000}')
 
 user() { echo "{\"__typename\": \"User\", \"login\": \"$1\"}"; }
@@ -42,8 +42,9 @@ run() {
   jq -c 'if .checks == null then [{data: {repository: {object: {statusCheckRollup: null}}}}]
          else [{data: {repository: {object: {statusCheckRollup: {contexts: {nodes: .checks}}}}}}] end' <<<"$w" > "$tmp/checks"
   jq -c '.runs' <<<"$w" > "$tmp/runs"
+  jq -c '.rules' <<<"$w" > "$tmp/rules"
   jq -n -c -f "$jqfile" \
-    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" \
+    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" --slurpfile rules "$tmp/rules" \
     --arg orgs "$(jq -r .orgs <<<"$w")" --arg bots "$(jq -r .bots <<<"$w")" \
     --slurpfile head "$tmp/head" --slurpfile reviews "$tmp/reviews" --slurpfile comments "$tmp/comments" \
     --slurpfile threads "$tmp/threads" --slurpfile timeline "$tmp/timeline" --slurpfile checks "$tmp/checks"
@@ -229,6 +230,22 @@ check "a review on an older commit is stale" \
 check "the newest Copilot review decides the reviewed sha" \
   ".reviews = [$(review r2 "$COPILOT" NONE COMMENTED '' "$HEAD" 2), $(review r1 "$COPILOT" NONE COMMENTED '' "$OLD" 1)]" '.copilot.stale | not'
 check "a repo without Copilot is neither involved nor stale" '.' '(.copilot.involved | not) and (.copilot.stale | not)'
+AUTO='{"type": "copilot_code_review", "parameters": {"review_on_push": false}}'
+check "a repo without an auto-review rule asks Copilot first" '.' '.copilot.auto == false and .copilot.first_request'
+check "an auto-review rule means GitHub asks, not the agent" \
+  ".rules = [{\"type\": \"pull_request\"}, $AUTO]" '.copilot.auto and (.copilot.first_request | not)'
+check "unreadable rules are not 'no rule': no first request" \
+  '.rules = null' '.copilot.auto == null and (.copilot.first_request | not)'
+check "Copilot already asked: no first request" \
+  ".timeline = [$(asked 1)]" '.copilot.auto == false and (.copilot.first_request | not)'
+
+echo "== request-copilot"
+rc=0; out=$(BABYSIT_COPILOT=never "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?
+if [ "$rc" -eq 6 ]; then echo "ok   BABYSIT_COPILOT=never refuses before any API call"; pass=$((pass + 1))
+else echo "FAIL BABYSIT_COPILOT=never: exit $rc: $out"; fail=$((fail + 1)); fi
+rc=0; out=$(BABYSIT_COPILOT=always "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?
+if [ "$rc" -eq 2 ]; then echo "ok   an unknown BABYSIT_COPILOT value is a usage error"; pass=$((pass + 1))
+else echo "FAIL BABYSIT_COPILOT=always: exit $rc: $out"; fail=$((fail + 1)); fi
 
 echo
 echo "babysit-pr state: $pass passed, $fail failed"

@@ -84,6 +84,11 @@ if [ -n "$head_sha" ]; then
     --jq '.workflow_runs | map({path, status, conclusion, created_at, updated_at, html_url})' \
     > "$tmp/runs.json" 2>/dev/null || echo '[]' > "$tmp/runs.json"
 
+  # Whether a ruleset on the base branch makes Copilot review new PRs on its
+  # own. "null" means the rules could not be read, which is not "no rule".
+  base=$(jq -r '.data.repository.pullRequest.baseRefName' "$tmp/head0.json")
+  gh api "repos/$repo/rules/branches/$base" > "$tmp/rules.json" 2>/dev/null || echo 'null' > "$tmp/rules.json"
+
   # Read the head again: a push, review or comment that landed mid-read means
   # the pieces describe different moments, so nothing is judged on them.
   read_head head.json
@@ -94,6 +99,7 @@ if [ -n "$head_sha" ]; then
   fi
 else
   cp "$tmp/head0.json" "$tmp/head.json"
+  echo 'null' > "$tmp/rules.json"
   for f in reviews comments threads timeline checks runs; do echo '[]' > "$tmp/$f.json"; done
 fi
 
@@ -106,6 +112,7 @@ jq -n -c -f "$here/state.jq" \
   --slurpfile timeline "$tmp/timeline.json" \
   --slurpfile checks "$tmp/checks.json" \
   --slurpfile runs "$tmp/runs.json" \
+  --slurpfile rules "$tmp/rules.json" \
   --argjson now "$(date +%s)" > "$tmp/out.json"
 
 cat "$tmp/out.json"
