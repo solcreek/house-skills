@@ -9,6 +9,14 @@
       "name": "dev",
       "source": "./plugins/dev",
       "description": "Development workflow: babysit a pull request to mergeable"
+    },
+    {
+      "name": "ystack",
+      "source": {
+        "source": "github",
+        "repo": "solcreek/ystack"
+      },
+      "description": "Agent-native dev workflow: route tasks to playbooks, prove work on the real surface, and refuse 'done' without fresh evidence"
     }
   ]
 }
