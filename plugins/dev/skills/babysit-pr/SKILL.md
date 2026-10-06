@@ -95,8 +95,10 @@ then push **once**.
    [references/local-review.md](references/local-review.md) over
    `<since>..HEAD`, where `<since>` is `reviewed_sha`, else
    `copilot.reviewed_sha`, else `git merge-base origin/$base HEAD`. Triage its
-   findings like any other; fix and commit what you adopt. Record the HEAD it
-   reviewed — the summary comment's `reviewed` marker carries it.
+   findings like any other; fix and commit what you adopt. The summary
+   comment's `reviewed` marker records the exact HEAD the subagent saw — never
+   a later one. Commits made after it (fixes for its findings) are reviewed in
+   the next cycle, or before finishing (see "Settled and clean").
 6. **Push**: `git push`. Never `--force`, never to the base branch.
 7. **Answer.**
    - Thread, Fixed → `$S/thread reply <id>` with `Fixed in <sha> — <what changed>`.
@@ -143,15 +145,17 @@ then push **once**.
 
 When `work == 0` and `settled`:
 
-1. Resolve each `awaiting` thread whose `reply` starts with `Fixed` (checks are
+1. If you pushed commits after `reviewed_sha`, run the local review (step 5)
+   on `reviewed_sha..HEAD` first; anything it adopts makes this a work cycle.
+2. Resolve each `awaiting` thread whose `reply` starts with `Fixed` (checks are
    green on this head, and the fix is in it).
-2. **Copilot confirmation.** If `copilot.involved` and `copilot.stale`, your
+3. **Copilot confirmation.** If `copilot.involved` and `copilot.stale`, your
    local review covered the head, and this run has asked Copilot fewer than
    **3** times: `$S/request-copilot $R $N`, then wait. Exit 5 means Copilot
    is not available on this repo — carry on without it. Never request Copilot
    on a PR it has not reviewed before: its reviews are billed, and the local
    review stands in.
-3. If `done` and nothing above applies → finish.
+4. If `done` and nothing above applies → finish.
 
 ## Budgets and stops
 
