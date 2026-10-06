@@ -1,0 +1,7 @@
+{
+  "name": "dev",
+  "description": "Development workflow: babysit a pull request to mergeable",
+  "author": {
+    "name": "Creek"
+  }
+}

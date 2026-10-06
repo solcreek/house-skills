@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Run before every push. Validates the marketplace and runs every skill test.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "==> Shell syntax"
+for f in "$root"/plugins/*/skills/*/scripts/* "$root"/test/*/run "$root"/bin/*; do
+  head -1 "$f" | grep -q bash || continue
+  bash -n "$f"
+done
+
+echo "==> Executable bits"
+for f in "$root"/plugins/*/skills/*/scripts/* "$root"/test/*/run "$root"/bin/*; do
+  head -1 "$f" | grep -q '^#!' || continue
+  [ -x "$f" ] || { echo "not executable: ${f#$root/}"; exit 1; }
+done
+
+echo "==> Marketplace"
+if command -v claude >/dev/null; then
+  claude plugin validate "$root"
+else
+  echo "claude CLI not found; skipping 'claude plugin validate'"
+fi
+
+for t in "$root"/test/*/run; do
+  echo "==> ${t#$root/}"
+  "$t"
+done
+
+echo
+echo "CI passed."

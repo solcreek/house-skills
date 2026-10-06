@@ -1,0 +1,14 @@
+{
+  "name": "house-skills",
+  "description": "Shared Claude Code skills for the Creek team",
+  "owner": {
+    "name": "Creek"
+  },
+  "plugins": [
+    {
+      "name": "dev",
+      "source": "./plugins/dev",
+      "description": "Development workflow: babysit a pull request to mergeable"
+    }
+  ]
+}
