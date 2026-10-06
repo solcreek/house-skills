@@ -47,9 +47,9 @@ once, then stop.
 
 ## Setup (once per run)
 
-1. **Resolve the PR.** `$ARGUMENTS` is a number, a PR URL, or empty (then
-   `gh pr view --json number,url` on the current branch). If none resolves,
-   stop and ask for one. `$R` comes from the URL or
+1. **Resolve the PR** from the argument, `$ARGUMENTS`: a PR number, a PR URL,
+   or nothing, in which case use `gh pr view --json number,url` on the current
+   branch. If none resolves, stop and ask for one. `$R` comes from the URL or
    `gh repo view --json nameWithOwner -q .nameWithOwner`; if the URL's repo is
    not this checkout's, stop.
 2. **Read state** with `$S/pr-state $R $N`. Not `OPEN` → stop.
