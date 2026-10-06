@@ -2,6 +2,7 @@
 name: babysit-pr
 description: "Drive a pull request to mergeable without supervision: fix failing CI, merge in the base on conflicts, address review feedback from trusted people and review bots (Copilot, Codex), reply to and resolve threads, review its own commits before pushing, and wait for checks and reviewers in the background. Manual only: /dev:babysit-pr [PR number or URL]."
 disable-model-invocation: true
+effort: high
 argument-hint: "[PR number or URL]"
 allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/scripts/*)
