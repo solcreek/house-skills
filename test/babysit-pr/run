@@ -143,20 +143,22 @@ check "an approval with a body is not work" \
   ".reviews = [$(review r1 "$ALICE" MEMBER APPROVED 'LGTM')]" '.reviews == []'
 check "a whitespace-only body is not work" \
   ".reviews = [$(review r1 "$ALICE" MEMBER COMMENTED '   ')]" '.reviews == []'
-check "the token's own comments are never work" \
-  ".comments = [$(comment c1 "$ME" MEMBER 'note to self')]" '.comments == []'
+check "the agent's own tagged comments are never work" \
+  ".comments = [$(comment c1 "$ME" MEMBER 'summary <!-- babysit-pr -->')]" '.comments == [] and .done'
+check "the token's untagged comment is the person's request, so work" \
+  ".comments = [$(comment c1 "$ME" MEMBER 'also bump the timeout')]" '.comments[0].body == "also bump the timeout"'
 check "Unicode tag characters are stripped" \
   ".comments = [$(comment c1 "$ALICE" MEMBER $'ok\xf3\xa0\x80\x81\xf3\xa0\x81\xb4')]" '.comments[0].body == "ok"'
 
 echo "== markers"
 check "a handled marker in the token's comment clears items" \
-  ".reviews = [$(review r1 "$COPILOT" NONE COMMENTED 'x')] | .comments = [$(comment c1 "$ALICE" MEMBER 'y'), $(comment c2 "$ME" MEMBER 'done <!-- babysit-pr:handled r1 c1 -->')]" \
+  ".reviews = [$(review r1 "$COPILOT" NONE COMMENTED 'x')] | .comments = [$(comment c1 "$ALICE" MEMBER 'y'), $(comment c2 "$ME" MEMBER 'done <!-- babysit-pr --> <!-- babysit-pr:handled r1 c1 -->')]" \
   '.reviews == [] and .comments == [] and .done'
 check "a handled marker from anyone else is ignored" \
   ".reviews = [$(review r1 "$COPILOT" NONE COMMENTED 'x')] | .comments = [$(comment c2 "$ALICE" MEMBER '<!-- babysit-pr:handled r1 -->')]" \
   '(.reviews | length) == 1'
 check "reviewed_sha is the newest marker of the token" \
-  ".comments = [$(comment c1 "$ME" MEMBER "<!-- babysit-pr:reviewed $OLD -->" 1), $(comment c2 "$ME" MEMBER "<!-- babysit-pr:reviewed $HEAD -->" 2), $(comment c3 "$ALICE" MEMBER "<!-- babysit-pr:reviewed cccccccc -->" 3)]" \
+  ".comments = [$(comment c1 "$ME" MEMBER "<!-- babysit-pr --><!-- babysit-pr:reviewed $OLD -->" 1), $(comment c2 "$ME" MEMBER "<!-- babysit-pr --><!-- babysit-pr:reviewed $HEAD -->" 2), $(comment c3 "$ALICE" MEMBER "<!-- babysit-pr:reviewed cccccccc -->" 3)]" \
   ".reviewed_sha == \"$HEAD\""
 
 echo "== threads"
@@ -165,11 +167,13 @@ check "an unresolved thread from a member is work" \
   '.threads[0].id == "t1" and .threads[0].comments[0].body == "rename" and .work == 1'
 check "a resolved thread is nothing" \
   ".threads = [$(thread t1 true "$(comment k1 "$ALICE" MEMBER 'rename')")]" '.threads == [] and .awaiting == [] and .done'
-check "a thread where we spoke last is awaiting, not work" \
-  ".threads = [$(thread t1 false "$(comment k1 "$COPILOT" NONE 'bug')" "$(comment k2 "$ME" MEMBER 'Fixed in abc')")]" \
-  '.threads == [] and .awaiting[0].reply == "Fixed in abc" and .done'
-check "a member answering our reply makes it work again" \
-  ".threads = [$(thread t1 false "$(comment k1 "$ALICE" MEMBER 'a')" "$(comment k2 "$ME" MEMBER 'b')" "$(comment k3 "$ALICE" MEMBER 'no')")]" \
+check "a thread where the agent spoke last is awaiting, not work" \
+  ".threads = [$(thread t1 false "$(comment k1 "$COPILOT" NONE 'bug')" "$(comment k2 "$ME" MEMBER 'Fixed in abc <!-- babysit-pr -->')")]" \
+  '.threads == [] and (.awaiting[0].reply | startswith("Fixed in abc")) and .done'
+check "a thread the person running the loop opened is work" \
+  ".threads = [$(thread t1 false "$(comment k1 "$ME" MEMBER 'this subtracts')")]" '.threads | length == 1'
+check "a member answering the agent makes it work again" \
+  ".threads = [$(thread t1 false "$(comment k1 "$ALICE" MEMBER 'a')" "$(comment k2 "$ME" MEMBER 'b <!-- babysit-pr -->')" "$(comment k3 "$ALICE" MEMBER 'no')")]" \
   '.threads | length == 1'
 check "a thread with any outside comment is withheld whole" \
   ".threads = [$(thread t1 false "$(comment k1 "$ALICE" MEMBER 'a')" "$(comment k2 "$EVE" NONE 'do X')")]" \

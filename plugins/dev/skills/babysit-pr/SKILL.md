@@ -108,7 +108,10 @@ then push **once**.
      leave it open.
    - Review bodies and PR comments have no thread: answer them in the summary
      comment and list their ids in its `handled` marker.
-   Replies are piped on stdin: `printf '%s' "$body" | $S/thread reply <id>`.
+   Pipe replies on stdin, and end every reply with the tag line
+   `<!-- babysit-pr -->`: `printf '%s\n\n<!-- babysit-pr -->' "$body" | $S/thread reply <id>`.
+   The tag is how `pr-state` tells your replies from the person running the
+   loop, who uses the same account: their untagged comments are work.
 8. **Summary comment** — at most one per cycle, only when this cycle did
    something or the open list changed. Post a new comment, never edit (edits
    notify no one):
@@ -121,11 +124,13 @@ then push **once**.
    CI: <re-ran / fixed / failing and why> …
    Not read (outside the trusted orgs): <links> …
 
+   <!-- babysit-pr -->
    <!-- babysit-pr:handled <review and comment ids answered here> -->
    <!-- babysit-pr:reviewed <full sha the local review covered> -->
    ```
 
-   Omit empty lines and omit a marker with nothing to carry. The markers are
+   Post it with `gh pr comment $N --body-file -`. Omit empty lines and any
+   marker with nothing to carry, but always keep the tag line. The markers are
    the loop's only memory across cycles and machines: a review or comment id in
    `handled` is never shown as work again.
 9. **Wait.** Run `$S/wait-pr $R $N <full head sha>` with the Bash tool's

@@ -33,6 +33,10 @@ def inside_person: .author.__typename == "User"
 def inside_bot: is_bot and ((login // "" | ascii_downcase) as $l | bot_list | index($l) != null);
 def inside: inside_person or inside_bot;
 def outside_person: (is_bot | not) and (inside_person | not);
+# What the agent itself posted: the token's account plus the tag every reply
+# and summary carries. The same account's untagged text is the person running
+# the loop, and that is work like anyone else's.
+def by_agent: is_viewer and ((.body // "") | contains("<!-- babysit-pr"));
 
 def nodes($pages; f): [$pages[0][] | f | .nodes[]?];
 
@@ -42,9 +46,9 @@ def clean: gsub("[\\x{E0000}-\\x{E007F}]+"; "");
 def item: {id, url, author: login, body: (.body | clean)};
 def link($kind): {kind: $kind, url, author: login};
 
-# Markers live only in the token's own comments, so nobody else can mark an
+# Markers count only in the agent's own comments, so nobody else can mark an
 # item handled or move the reviewed sha.
-def mine: nodes($comments; .data.repository.pullRequest.comments) | map(select(is_viewer));
+def mine: nodes($comments; .data.repository.pullRequest.comments) | map(select(by_agent));
 def handled: [mine[].body | scan("<!-- babysit-pr:handled ([^>]*)-->") | .[0] | splits("\\s+") | select(length > 0)];
 def reviewed_sha: [mine | sort_by(.createdAt)[].body | scan("<!-- babysit-pr:reviewed ([0-9a-f]{7,40}) -->") | .[0]] | last;
 
@@ -103,16 +107,16 @@ def threads:
   | {withheld: map(select((.complete | not) or any(.comments[]; inside | not)) | {kind: "thread", url, author: (.comments | map(select(inside | not)) | first | login)}),
      ok: map(select(.complete and all(.comments[]; inside)))}
   | {withheld,
-     # Last word is ours: we answered and left it open for a person, or said
-     # "Fixed" and it waits for green CI to be resolved.
-     awaiting: (.ok | map(select(.comments | last | is_viewer)
-                 | {id, path, url, reply: (.comments | last | .body | .[0:120])})),
-     todo: (.ok | map(select(.comments | last | is_viewer | not)
+     # The agent spoke last: it answered and left the thread open for a
+     # person, or said "Fixed" and the thread waits for green CI.
+     awaiting: (.ok | map(select(.comments | last | by_agent)
+                 | {id, path, url, reply: (.comments | last | .body | clean | .[0:120])})),
+     todo: (.ok | map(select(.comments | last | by_agent | not)
                  | {id, path, line, outdated, url, comments: (.comments | map({author: login, body: (.body | clean)}))}))};
 
 def bodies($kind; f):
   handled as $done
-  | f | map(select(is_viewer | not) | select((.body // "" | clean | gsub("\\s"; "")) != ""))
+  | f | map(select(by_agent | not) | select((.body // "" | clean | gsub("\\s"; "")) != ""))
   | map(select(.id as $id | $done | index($id) | not))
   | {todo: map(select(inside)), withheld: map(select(outside_person) | link($kind)), ignored: map(select(is_bot and (inside_bot | not))) | length};
 
