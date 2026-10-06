@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# request-copilot OWNER/REPO NUMBER
+#
+# Asks Copilot to review the PR's current head, at most once per pending
+# request. Prints {"action": "requested"|"skipped", "pending": N}.
+#
+# REST, not `gh pr edit --add-reviewer`: that command resolves the PR through a
+# broad GraphQL query whose deprecated fields have broken it before. And a 2xx
+# is not proof: GitHub accepts a reviewer it cannot add (Copilot not enabled
+# for the repo or plan) and silently drops it, so the request only counts once
+# pr-state shows it pending.
+#
+# Exit 0 on success, 5 when the request was accepted but never showed up
+# (Copilot is unavailable here), 1 on any other failure, 2 usage.
+set -euo pipefail
+
+usage="usage: request-copilot OWNER/REPO NUMBER"
+repo=${1:?$usage}
+number=${2:?$usage}
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+attempts=${BABYSIT_CONFIRM_ATTEMPTS:-6}
+
+pending() {
+  local out rc=0
+  out=$("$here/pr-state" "$repo" "$number") || rc=$?
+  [ "$rc" -eq 0 ] || { echo "request-copilot: pr-state exited $rc: $out" >&2; exit 1; }
+  jq -er '.copilot.pending' <<<"$out"
+}
+
+n=$(pending)
+if [ "$n" -gt 0 ]; then
+  jq -nc --argjson n "$n" '{action: "skipped", pending: $n}'
+  exit 0
+fi
+
+gh api "repos/$repo/pulls/$number/requested_reviewers" -X POST \
+  -f 'reviewers[]=copilot-pull-request-reviewer[bot]' >/dev/null
+
+for i in $(seq 1 "$attempts"); do
+  n=$(pending)
+  if [ "$n" -gt 0 ]; then
+    jq -nc --argjson n "$n" '{action: "requested", pending: $n}'
+    exit 0
+  fi
+  [ "$i" -lt "$attempts" ] && sleep 3
+done
+echo "request-copilot: GitHub accepted the request but no Copilot review is pending; Copilot review is probably not enabled for $repo" >&2
+exit 5

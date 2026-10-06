@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# thread reply THREAD_ID   (reply body on stdin)
+# thread resolve THREAD_ID
+#
+# Replies to or resolves a review thread by its GraphQL id (pr-state's
+# threads[].id / awaiting[].id). The body comes on stdin so no shell quoting
+# can mangle it.
+set -euo pipefail
+
+usage="usage: thread reply THREAD_ID <BODY  |  thread resolve THREAD_ID"
+action=${1:?$usage}
+id=${2:?$usage}
+
+case $action in
+  reply)
+    body=$(cat)
+    [ -n "$body" ] || { echo "thread: empty reply body" >&2; exit 2; }
+    gh api graphql -f id="$id" -f body="$body" -f query='
+      mutation($id: ID!, $body: String!) {
+        addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body}) { comment { url } } }' \
+      --jq '.data.addPullRequestReviewThreadReply.comment.url'
+    ;;
+  resolve)
+    gh api graphql -f id="$id" -f query='
+      mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' \
+      --jq '.data.resolveReviewThread.thread.isResolved'
+    ;;
+  *) echo "$usage" >&2; exit 2 ;;
+esac

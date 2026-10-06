@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# wait-pr OWNER/REPO NUMBER HEAD_SHA   (the full 40-character sha)
+#
+# Blocks until the PR needs the agent again, then prints one JSON line. Run it
+# with the Bash tool's run_in_background: the polling happens in this process
+# and the agent is woken once, when it exits — waiting costs no turns.
+#
+# Returns as soon as any of these holds (exit 0, "reason" says which):
+#   moved    the head is no longer HEAD_SHA (someone else pushed)
+#   closed   the PR is no longer open
+#   work     new feedback, a failing check or a conflict appeared
+#   settled  no check is pending, Copilot is not mid-review, and GitHub has
+#            computed mergeability
+# Other exits:
+#   1  timeout ({"timeout": true, "pending": [...]}) — BABYSIT_WAIT_TIMEOUT, default 1800 s
+#   3  pr-state refused, or failed three reads in a row (its output is passed through)
+#   2  usage
+set -euo pipefail
+
+usage="usage: wait-pr OWNER/REPO NUMBER HEAD_SHA"
+repo=${1:?$usage}
+number=${2:?$usage}
+want=${3:?$usage}
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+timeout=${BABYSIT_WAIT_TIMEOUT:-1800}
+interval=${BABYSIT_WAIT_INTERVAL:-30}
+[[ "$timeout" =~ ^[0-9]+$ && "$interval" =~ ^[0-9]+$ ]] || { echo "BABYSIT_WAIT_TIMEOUT and BABYSIT_WAIT_INTERVAL must be whole seconds" >&2; exit 2; }
+
+start=$(date +%s)
+failures=0
+state='{}'
+while :; do
+  rc=0
+  out=$("$here/pr-state" "$repo" "$number" 2>&1) || rc=$?
+  case $rc in
+    0)
+      failures=0
+      state=$out
+      reason=$(jq -r --arg want "$want" '
+        if .state != "OPEN" then "closed"
+        elif .head != $want then "moved"
+        elif .work > 0 then "work"
+        elif .settled then "settled"
+        else empty end' <<<"$state")
+      if [ -n "$reason" ]; then
+        jq -c --arg reason "$reason" '{reason: $reason, head, work, settled, done}' <<<"$state"
+        exit 0
+      fi
+      ;;
+    3) echo "$out"; exit 3 ;;
+    4) ;; # changed mid-read; the next poll reads it whole
+    *)
+      failures=$((failures + 1))
+      if [ "$failures" -ge 3 ]; then
+        jq -nc --arg error "$out" '{error: $error}'
+        exit 3
+      fi
+      ;;
+  esac
+  if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+    jq -c '{timeout: true, head, pending: .checks.pending, copilot_pending: .copilot.pending, mergeable}' <<<"$state" 2>/dev/null || echo '{"timeout": true}'
+    exit 1
+  fi
+  sleep "$interval"
+done

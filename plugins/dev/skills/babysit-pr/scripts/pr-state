@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# pr-state OWNER/REPO NUMBER
+#
+# The one way babysit-pr reads a pull request: CI, mergeability, Copilot's
+# progress, and every piece of review feedback, already split by trust (see
+# state.jq). Prints one JSON object.
+#
+# Exit codes:
+#   0  the state, read consistently
+#   3  refused: JSON {"refused": "..."} — a person has to look at this PR
+#   4  the PR changed while it was being read; run again
+#   1  the read failed (message on stderr)
+#   2  usage
+#
+# Trust comes from the environment only, never from a file in the repo under
+# review, which the PR itself could change:
+#   BABYSIT_ORGS  comma-separated GitHub orgs whose OWNER/MEMBER people are trusted
+#   BABYSIT_BOTS  extra review-bot logins to trust (Copilot, Codex, GHAS and
+#                 Claude are built in)
+set -euo pipefail
+
+usage="usage: pr-state OWNER/REPO NUMBER"
+repo=${1:?$usage}
+number=${2:?$usage}
+[[ "$repo" == */* ]] || { echo "$usage" >&2; exit 2; }
+[[ "$number" =~ ^[1-9][0-9]*$ ]] || { echo "$usage" >&2; exit 2; }
+command -v jq >/dev/null || { echo "pr-state needs jq" >&2; exit 1; }
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+args=(-F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number")
+vars='$owner: String!, $name: String!, $number: Int!'
+who='author { __typename login } authorAssociation'
+
+read_head() {
+  gh api graphql "${args[@]}" -f query="query($vars) {
+    viewer { login }
+    repository(owner: \$owner, name: \$name) {
+      owner { __typename login ... on Organization { viewerIsAMember } }
+      pullRequest(number: \$number) {
+        number url state isDraft isCrossRepository headRefName baseRefName headRefOid
+        mergeable mergeStateStatus $who
+        labels(first: 100) { nodes { name } }
+        reviewRequests(first: 100) { nodes { requestedReviewer {
+          __typename ... on Bot { login } ... on User { login } ... on Team { slug } } } }
+        reviews { totalCount } comments { totalCount } reviewThreads { totalCount }
+      } } }" > "$tmp/$1"
+}
+
+page() { # page FILE CONNECTION EXTRA-ARGS NODE-FIELDS
+  gh api graphql --paginate --slurp "${args[@]}" -f query="query($vars, \$endCursor: String) {
+    repository(owner: \$owner, name: \$name) { pullRequest(number: \$number) {
+      $2($3 first: 100, after: \$endCursor) { pageInfo { hasNextPage endCursor } nodes { $4 } } } } }" > "$tmp/$1"
+}
+
+read_head head0.json
+head_sha=$(jq -r '.data.repository.pullRequest.headRefOid // empty' "$tmp/head0.json")
+
+if [ -n "$head_sha" ]; then
+  page reviews.json reviews "" "id url state body createdAt $who commit { oid }"
+  page comments.json comments "" "id url body createdAt $who"
+  page threads.json reviewThreads "" "id isResolved isOutdated path line
+    comments(first: 100) { totalCount nodes { id url body createdAt $who } }"
+  page timeline.json timelineItems 'itemTypes: [REVIEW_REQUESTED_EVENT],' \
+    '... on ReviewRequestedEvent { requestedReviewer { __typename ... on Bot { login } } }'
+  gh api graphql --paginate --slurp -F owner="${repo%%/*}" -F name="${repo#*/}" -f oid="$head_sha" \
+    -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!, \$endCursor: String) {
+    repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit {
+      statusCheckRollup { contexts(first: 100, after: \$endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { __typename
+          ... on CheckRun { name status conclusion startedAt detailsUrl
+            checkSuite { app { slug } workflowRun { databaseId workflow { name } } } }
+          ... on StatusContext { context state targetUrl createdAt } } } } } } } }" > "$tmp/checks.json"
+
+  # Read the head again: a push, review or comment that landed mid-read means
+  # the pieces describe different moments, so nothing is judged on them.
+  read_head head.json
+  sig() { jq -r '.data.repository.pullRequest | [.headRefOid, .reviews.totalCount, .comments.totalCount, .reviewThreads.totalCount] | @tsv' "$1"; }
+  if [ "$(sig "$tmp/head0.json")" != "$(sig "$tmp/head.json")" ]; then
+    echo '{"retry": "the PR changed while it was being read"}'
+    exit 4
+  fi
+else
+  cp "$tmp/head0.json" "$tmp/head.json"
+  for f in reviews comments threads timeline checks; do echo '[]' > "$tmp/$f.json"; done
+fi
+
+jq -n -c -f "$here/state.jq" \
+  --arg orgs "${BABYSIT_ORGS:-}" --arg bots "${BABYSIT_BOTS:-}" \
+  --slurpfile head "$tmp/head.json" \
+  --slurpfile reviews "$tmp/reviews.json" \
+  --slurpfile comments "$tmp/comments.json" \
+  --slurpfile threads "$tmp/threads.json" \
+  --slurpfile timeline "$tmp/timeline.json" \
+  --slurpfile checks "$tmp/checks.json" > "$tmp/out.json"
+
+cat "$tmp/out.json"
+jq -e '.refused == null' "$tmp/out.json" >/dev/null || exit 3
