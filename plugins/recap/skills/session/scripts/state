@@ -30,9 +30,15 @@ commits_json() {
     jq -R 'split("\t") | {sha: .[0], subject: (.[1:] | join("\t"))}' | jq -sc .
 }
 
-# base_ref — the branch this one will merge into: origin's HEAD, else main/master
+# base_ref [PR-BASE] — the branch this one will merge into: the PR's base when
+# it resolves, else origin's HEAD, else main/master
 base_ref() {
   local b
+  if [ -n "${1:-}" ]; then
+    for b in "origin/$1" "$1"; do
+      git rev-parse -q --verify "$b^{commit}" >/dev/null && { echo "$b"; return; }
+    done
+  fi
   b=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) && { echo "$b"; return; }
   for b in origin/main origin/master main master; do
     git rev-parse -q --verify "$b^{commit}" >/dev/null && { echo "$b"; return; }
@@ -59,7 +65,7 @@ pr_json() {
   if ! command -v gh >/dev/null; then
     echo '{"unknown": "gh is not installed"}'; return
   fi
-  if ! out=$(gh pr view --json number,url,state,isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid,statusCheckRollup 2>&1); then
+  if ! out=$(gh pr view --json number,url,state,isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid,baseRefName,statusCheckRollup 2>&1); then
     case "$out" in
       *"no pull requests found"*|*"no open pull requests"*) echo null ;;
       *) jq -nc --arg e "$(printf '%s' "$out" | head -n 1)" '{unknown: ("gh: " + $e)}' ;;
@@ -72,7 +78,7 @@ pr_json() {
                  else (.conclusion // "PENDING") end;
     def name: .name // .context;
     [.statusCheckRollup[]? | {name: name, verdict: verdict}] as $c |
-    {number, url, state, draft: .isDraft, mergeable, mergeState: .mergeStateStatus,
+    {number, url, state, base: .baseRefName, draft: .isDraft, mergeable, mergeState: .mergeStateStatus,
      reviewDecision: (if .reviewDecision == "" then null else .reviewDecision end),
      pushedHeadIsLocalHead: (.headRefOid == $head),
      checks: {
@@ -84,7 +90,7 @@ pr_json() {
 
 # repo_json — the state of the repository the shell is in
 repo_json() {
-  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null status gone=false
+  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null status gone=false pr
   top=$(git rev-parse --show-toplevel)
   head=$(git rev-parse -q --verify HEAD 2>/dev/null || true)
   branch=$(git symbolic-ref -q --short HEAD || echo "(detached)")
@@ -97,7 +103,8 @@ repo_json() {
     read -r behind ahead < <(git rev-list --left-right --count "$upstream...HEAD")
     unpushed=$(commits_json "$upstream..HEAD")
   fi
-  base=$(base_ref || true)
+  if [ "$branch" = "(detached)" ] || [ -z "$head" ]; then pr=null; else pr=$(pr_json "$head"); fi
+  base=$(base_ref "$(jq -r '.base? // empty' <<<"$pr")" || true)
   if [ -n "$base" ] && [ -n "$head" ]; then
     onbranch=$(commits_json "$base..HEAD")
   fi
@@ -113,7 +120,7 @@ repo_json() {
     --argjson untracked "$(printf '%s\n' "$status" | grep -c '^??' || true)" \
     --argjson files "$(printf '%s\n' "$status" | grep -v '^$' | lines_to_json)" \
     --argjson worktrees "$(worktrees_json)" \
-    --argjson pr "$(if [ "$branch" = "(detached)" ] || [ -z "$head" ]; then echo null; else pr_json "$head"; fi)" \
+    --argjson pr "$pr" \
     'def nonempty: if . == "" then null else . end;
      {root: $top, branch: $branch, head: ($head[0:12] | nonempty),
       upstream: ($upstream | nonempty), upstreamGone: $gone, ahead: $ahead, behind: $behind,

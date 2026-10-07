@@ -135,6 +135,23 @@ check "detached HEAD: no PR lookup" 0 \
   '.repos[0] | .branch == "(detached)" and .pr == null' -- \
   env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/fresh"
 
+git clone -q "$tmp/origin.git" "$tmp/rel" 2>/dev/null
+(
+  cd "$tmp/rel"
+  git checkout -qb release/1 origin/main; echo r > r; git add r; git commit -qm "release only"
+  git push -q origin release/1
+  git checkout -qb fix; echo f > f; git add f; git commit -qm "the fix"
+)
+GH_OUT=$(jq -c --arg h "$(git -C "$tmp/rel" rev-parse HEAD)" '.headRefOid = $h | .baseRefName = "release/1"' <<<"$pr_open") GH_EXIT=0
+check "a PR's base, not the default branch, bounds the branch's commits" 0 \
+  '.repos[0] | .base == "origin/release/1" and .pr.base == "release/1" and (.commitsOnBranch | map(.subject)) == ["the fix"]' -- \
+  env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/rel"
+
+GH_OUT=$pr_none GH_EXIT=1
+check "no PR: the default branch bounds the branch's commits" 0 \
+  '.repos[0] | .base == "origin/main" and (.commitsOnBranch | map(.subject)) == ["the fix", "release only"]' -- \
+  env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/rel"
+
 git -C "$tmp/repo" worktree add -q "$tmp/wt" -b other 2>/dev/null
 echo x > "$tmp/wt/x"
 check "worktrees listed with branch and dirty count" 0 \
