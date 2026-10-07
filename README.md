@@ -6,6 +6,7 @@ Shared Claude Code skills for the team, distributed as a
 | Plugin | Skill | What it does |
 |---|---|---|
 | `dev` | `/dev:babysit-pr [PR]` | Drives a PR to mergeable: fixes CI, merges in the base on conflicts, addresses trusted review feedback, replies and resolves threads, and waits for checks and Copilot in the background |
+| `recap` | `/recap:session [focus]` | Where this session stands and what to do next: done (with evidence checked against git and the PR), in progress, not verified, needs you, and ranked next steps. Loads on its own when you ask for a progress summary |
 | `ystack` | playbooks, verification skills, evidence gate | Agent-native dev workflow, maintained in [solcreek/ystack](https://github.com/solcreek/ystack) |
 
 ## Install
@@ -22,6 +23,7 @@ Then, in Claude Code:
 ```
 /plugin marketplace add solcreek/house-skills
 /plugin install dev@house-skills
+/plugin install recap@house-skills
 /plugin install ystack@house-skills
 ```
 

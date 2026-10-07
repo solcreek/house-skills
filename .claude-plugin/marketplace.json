@@ -11,6 +11,11 @@
       "description": "Development workflow: babysit a pull request to mergeable"
     },
     {
+      "name": "recap",
+      "source": "./plugins/recap",
+      "description": "Recaps: where the current session stands and what to do next"
+    },
+    {
       "name": "ystack",
       "source": {
         "source": "github",
