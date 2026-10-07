@@ -92,6 +92,16 @@ check "commits on branch run from the base" 0 \
 check "uncommitted: staged, unstaged and untracked counted" 0 \
   '.repos[0].uncommitted | .staged == 1 and .unstaged == 1 and .untracked == 1 and (.files | length) == 3' -- in_repo
 
+check "full counts beside the lists" 0 \
+  '.repos[0] | .commitsOnBranchCount == 2 and .uncommitted.total == 3' -- in_repo
+
+mkdir "$tmp/many"
+git -C "$tmp/many" init -q
+for i in $(seq 1 40); do : > "$tmp/many/f$i"; done
+check "a list cut at the cap still reports the full count" 0 \
+  '.repos[0].uncommitted | .total == 40 and (.files | length) == 30' -- \
+  env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/many"
+
 check "no PR is null, not unknown" 0 '.repos[0].pr == null' -- in_repo
 
 check "the same repo named twice is read once; a non-repo is skipped" 0 \

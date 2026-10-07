@@ -19,6 +19,8 @@ command -v jq >/dev/null || { echo "state needs jq" >&2; exit 1; }
 command -v git >/dev/null || { echo "state needs git" >&2; exit 1; }
 [ $# -gt 0 ] || set -- .
 
+# Lists stop at $cap entries. ahead, commitsOnBranchCount and
+# uncommitted.total are full counts, so a cut-short list is visible.
 cap=30
 
 # lines_to_json — stdin lines to a JSON array of strings, capped
@@ -90,7 +92,7 @@ pr_json() {
 
 # repo_json — the state of the repository the shell is in
 repo_json() {
-  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null status gone=false pr
+  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null onbranchCount=null status gone=false pr
   top=$(git rev-parse --show-toplevel)
   head=$(git rev-parse -q --verify HEAD 2>/dev/null || true)
   branch=$(git symbolic-ref -q --short HEAD || echo "(detached)")
@@ -107,6 +109,7 @@ repo_json() {
   base=$(base_ref "$(jq -r '.base? // empty' <<<"$pr")" || true)
   if [ -n "$base" ] && [ -n "$head" ]; then
     onbranch=$(commits_json "$base..HEAD")
+    onbranchCount=$(git rev-list --count "$base..HEAD")
   fi
   status=$(git status --porcelain)
 
@@ -114,7 +117,8 @@ repo_json() {
     --arg top "$top" --arg branch "$branch" --arg head "$head" \
     --arg upstream "$upstream" --argjson gone "$gone" --arg base "$base" \
     --argjson ahead "$ahead" --argjson behind "$behind" \
-    --argjson unpushed "$unpushed" --argjson onbranch "$onbranch" \
+    --argjson unpushed "$unpushed" --argjson onbranch "$onbranch" --argjson onbranchCount "$onbranchCount" \
+    --argjson total "$(printf '%s\n' "$status" | grep -c . || true)" \
     --argjson staged "$(printf '%s\n' "$status" | grep -c '^[MADRC]' || true)" \
     --argjson unstaged "$(printf '%s\n' "$status" | grep -c '^.[MD]' || true)" \
     --argjson untracked "$(printf '%s\n' "$status" | grep -c '^??' || true)" \
@@ -126,8 +130,8 @@ repo_json() {
       upstream: ($upstream | nonempty), upstreamGone: $gone, ahead: $ahead, behind: $behind,
       note: "ahead/behind are as of the last fetch",
       unpushed: $unpushed,
-      base: ($base | nonempty), commitsOnBranch: $onbranch,
-      uncommitted: {staged: $staged, unstaged: $unstaged, untracked: $untracked, files: $files},
+      base: ($base | nonempty), commitsOnBranch: $onbranch, commitsOnBranchCount: $onbranchCount,
+      uncommitted: {total: $total, staged: $staged, unstaged: $unstaged, untracked: $untracked, files: $files},
       worktrees: $worktrees, pr: $pr}'
 }
 

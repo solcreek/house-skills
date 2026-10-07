@@ -24,6 +24,10 @@ current directory. It prints JSON per repo: branch, uncommitted files,
 its checks (`pr` is null when there is none; `{"unknown": ...}` when gh could
 not answer — say so, never read it as "no PR").
 
+Lists stop at 30 entries. When `ahead`, `commitsOnBranchCount` or
+`uncommitted.total` is larger than its list, say the list was cut short and
+by how much; never present it as the whole.
+
 `unpushed` null means nothing to compare against, not nothing pushed: with
 no `upstream` the branch may still have been pushed without tracking (check
 `pr`); with `upstreamGone` the remote branch was deleted, usually because its
