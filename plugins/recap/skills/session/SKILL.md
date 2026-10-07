@@ -20,10 +20,14 @@ If the user gave a focus, `$ARGUMENTS`, recap only that thread of work.
 Run `${CLAUDE_SKILL_DIR}/scripts/state DIR...` with every git checkout this
 session read or changed (worktrees included); with none named, it reads the
 current directory. It prints JSON per repo: branch, uncommitted files,
-`unpushed` commits (null when the branch has no upstream, so nothing is
-pushed), `commitsOnBranch` since the base, worktrees, and the branch's PR with
+`unpushed` commits, `commitsOnBranch` since the base, worktrees, and the branch's PR with
 its checks (`pr` is null when there is none; `{"unknown": ...}` when gh could
 not answer — say so, never read it as "no PR").
+
+`unpushed` null means nothing to compare against, not nothing pushed: with
+no `upstream` the branch may still have been pushed without tracking (check
+`pr`); with `upstreamGone` the remote branch was deleted, usually because its
+PR merged.
 
 Exit codes: **0** state · **3** no directory was a git repository: the
 session's work is not in git, so recap from the conversation and say nothing
