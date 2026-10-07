@@ -53,6 +53,7 @@ pr_open=$(jq -nc --arg h "$HEAD_SHA" '{number: 7, url: "u/7", state: "OPEN", isD
   statusCheckRollup: [
     {__typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS"},
     {__typename: "CheckRun", name: "lint", status: "COMPLETED", conclusion: "FAILURE"},
+    {__typename: "CheckRun", name: "old", status: "COMPLETED", conclusion: "STALE"},
     {__typename: "CheckRun", name: "build", status: "IN_PROGRESS", conclusion: null},
     {__typename: "StatusContext", context: "deploy", state: "PENDING"},
     {__typename: "StatusContext", context: "ci/legacy", state: "SUCCESS"}]}')
@@ -102,6 +103,37 @@ check "a list cut at the cap still reports the full count" 0 \
   '.repos[0].uncommitted | .total == 40 and (.files | length) == 30' -- \
   env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/many"
 
+mkdir "$tmp/typechange"
+(
+  cd "$tmp/typechange"
+  git init -q; echo x > t; echo y > s; git add t s; git commit -qm "files"
+  rm t s; ln -s a t; ln -s a s; git add s
+)
+check "a file turned symlink is counted, staged or not" 0 \
+  '.repos[0].uncommitted | .total == 2 and .staged == 1 and .unstaged == 1' -- \
+  env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/typechange"
+
+mkdir "$tmp/sp" "$tmp/sp bar"
+git -C "$tmp/sp" init -q
+git -C "$tmp/sp bar" init -q
+check "a repo whose path prefixes another's, before a space, is still read" 0 \
+  '.repos | map(.root | split("/") | last) == ["sp bar", "sp"]' -- \
+  env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/sp bar" "$tmp/sp"
+
+# A git whose status read fails, everything else real.
+mkdir "$tmp/badgit"
+cat > "$tmp/badgit/git" <<EOF
+#!/bin/bash
+[ "\$1" = status ] && { echo "fatal: index file corrupt" >&2; exit 128; }
+exec "$(command -v git)" "\$@"
+EOF
+chmod +x "$tmp/badgit/git"
+# stderr_of COMMAND... — COMMAND's stderr as {stderr}, its stdout dropped
+stderr_of() { "$@" 2>&1 >/dev/null | jq -Rsc '{stderr: .}'; return "${PIPESTATUS[0]}"; }
+check "a failed read mid-repo is exit 1, not an empty field" 1 \
+  '.stderr | test("state: reading .* failed")' -- \
+  stderr_of env PATH="$tmp/badgit:$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/repo"
+
 check "no PR is null, not unknown" 0 '.repos[0].pr == null' -- in_repo
 
 check "the same repo named twice is read once; a non-repo is skipped" 0 \
@@ -109,7 +141,7 @@ check "the same repo named twice is read once; a non-repo is skipped" 0 \
 
 GH_OUT=$pr_open GH_EXIT=0
 check "PR checks rolled up by verdict" 0 \
-  '.repos[0].pr.checks | .passed == 2 and .failed == ["lint"] and (.pending | sort) == ["build", "deploy"]' -- in_repo
+  '.repos[0].pr.checks | .passed == 2 and .failed == ["lint", "old"] and (.pending | sort) == ["build", "deploy"]' -- in_repo
 
 check "PR status fields only: no title or body" 0 \
   '.repos[0].pr | has("title") or has("body") | not' -- in_repo

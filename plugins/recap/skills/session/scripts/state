@@ -86,7 +86,7 @@ pr_json() {
      checks: {
        passed:  [$c[] | select(.verdict == "SUCCESS" or .verdict == "NEUTRAL" or .verdict == "SKIPPED")] | length,
        pending: [$c[] | select(.verdict == "PENDING" or .verdict == "QUEUED" or .verdict == "IN_PROGRESS" or .verdict == "EXPECTED")] | map(.name),
-       failed:  [$c[] | select(.verdict | IN("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"))] | map(.name)
+       failed:  [$c[] | select(.verdict | IN("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"))] | map(.name)
      }}' <<<"$out"
 }
 
@@ -119,8 +119,8 @@ repo_json() {
     --argjson ahead "$ahead" --argjson behind "$behind" \
     --argjson unpushed "$unpushed" --argjson onbranch "$onbranch" --argjson onbranchCount "$onbranchCount" \
     --argjson total "$(printf '%s\n' "$status" | grep -c . || true)" \
-    --argjson staged "$(printf '%s\n' "$status" | grep -c '^[MADRC]' || true)" \
-    --argjson unstaged "$(printf '%s\n' "$status" | grep -c '^.[MD]' || true)" \
+    --argjson staged "$(printf '%s\n' "$status" | grep -c '^[MTADRC]' || true)" \
+    --argjson unstaged "$(printf '%s\n' "$status" | grep -c '^.[MTD]' || true)" \
     --argjson untracked "$(printf '%s\n' "$status" | grep -c '^??' || true)" \
     --argjson files "$(printf '%s\n' "$status" | grep -v '^$' | lines_to_json)" \
     --argjson worktrees "$(worktrees_json)" \
@@ -137,15 +137,19 @@ repo_json() {
 
 repos=()
 skipped=()
-seen=" "
+seen=()
 for dir in "$@"; do
   if ! top=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null); then
     skipped+=("$dir")
     continue
   fi
-  case "$seen" in *" $top "*) continue ;; esac
-  seen="$seen$top "
-  r=$(cd "$top" && repo_json) || { echo "state: reading $top failed" >&2; exit 1; }
+  dup=false
+  for s in ${seen[@]+"${seen[@]}"}; do [ "$s" = "$top" ] && dup=true; done
+  $dup && continue
+  seen+=("$top")
+  # Bash clears -e inside $(...) and ignores it left of ||, so set it again
+  # in the subshell: a failed read must fail, not yield an empty field.
+  r=$(set -e; cd "$top"; repo_json) || { echo "state: reading $top failed" >&2; exit 1; }
   repos+=("$r")
 done
 
