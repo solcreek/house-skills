@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# state [DIR...]
+#
+# What is actually true right now in each git checkout a session touched:
+# branch, uncommitted files, commits not yet pushed, commits on the branch,
+# other worktrees, and the branch's pull request with its checks. Prints one
+# JSON object: {"repos": [...], "skipped": [...]}. DIR defaults to ".".
+#
+# Reads only local git state and the PR's status fields. It never fetches, and
+# it never reads PR titles, bodies or comments: those are other people's text.
+#
+# Exit codes:
+#   0  state for at least one repo
+#   3  nothing to look at: no DIR is inside a git repository
+#   1  the read failed (message on stderr)
+set -euo pipefail
+
+command -v jq >/dev/null || { echo "state needs jq" >&2; exit 1; }
+command -v git >/dev/null || { echo "state needs git" >&2; exit 1; }
+[ $# -gt 0 ] || set -- .
+
+cap=30
+
+# lines_to_json — stdin lines to a JSON array of strings, capped
+lines_to_json() { head -n "$cap" | jq -R . | jq -sc .; }
+
+# commits_json RANGE — commits in RANGE as [{sha, subject}], newest first, capped
+commits_json() {
+  git log --format='%h%x09%s' -n "$cap" "$1" 2>/dev/null |
+    jq -R 'split("\t") | {sha: .[0], subject: (.[1:] | join("\t"))}' | jq -sc .
+}
+
+# base_ref — the branch this one will merge into: origin's HEAD, else main/master
+base_ref() {
+  local b
+  b=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) && { echo "$b"; return; }
+  for b in origin/main origin/master main master; do
+    git rev-parse -q --verify "$b^{commit}" >/dev/null && { echo "$b"; return; }
+  done
+}
+
+# worktrees_json — every worktree of this repo with its branch and dirty count
+worktrees_json() {
+  git worktree list --porcelain | awk '
+    /^worktree / { if (p != "") print p "\t" b; p = substr($0, 10); b = "" }
+    /^branch /   { b = substr($0, 8); sub("^refs/heads/", "", b) }
+    /^detached/  { b = "(detached)" }
+    END          { if (p != "") print p "\t" b }' |
+  while IFS=$(printf '\t') read -r path branch; do
+    dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    jq -nc --arg path "$path" --arg branch "$branch" --argjson dirty "${dirty:-0}" \
+      '{path: $path, branch: $branch, dirty: $dirty}'
+  done | jq -sc .
+}
+
+# pr_json HEAD — the current branch's PR, status fields only; null when none
+pr_json() {
+  local out
+  if ! command -v gh >/dev/null; then
+    echo '{"unknown": "gh is not installed"}'; return
+  fi
+  if ! out=$(gh pr view --json number,url,state,isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid,statusCheckRollup 2>&1); then
+    case "$out" in
+      *"no pull requests found"*|*"no open pull requests"*) echo null ;;
+      *) jq -nc --arg e "$(printf '%s' "$out" | head -n 1)" '{unknown: ("gh: " + $e)}' ;;
+    esac
+    return
+  fi
+  jq -c --arg head "$1" '
+    def verdict: if .__typename == "StatusContext" then (.state // "PENDING")
+                 elif .status != "COMPLETED" then "PENDING"
+                 else (.conclusion // "PENDING") end;
+    def name: .name // .context;
+    [.statusCheckRollup[]? | {name: name, verdict: verdict}] as $c |
+    {number, url, state, draft: .isDraft, mergeable, mergeState: .mergeStateStatus,
+     reviewDecision: (if .reviewDecision == "" then null else .reviewDecision end),
+     pushedHeadIsLocalHead: (.headRefOid == $head),
+     checks: {
+       passed:  [$c[] | select(.verdict == "SUCCESS" or .verdict == "NEUTRAL" or .verdict == "SKIPPED")] | length,
+       pending: [$c[] | select(.verdict == "PENDING" or .verdict == "QUEUED" or .verdict == "IN_PROGRESS" or .verdict == "EXPECTED")] | map(.name),
+       failed:  [$c[] | select(.verdict | IN("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"))] | map(.name)
+     }}' <<<"$out"
+}
+
+# repo_json — the state of the repository the shell is in
+repo_json() {
+  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null status
+  top=$(git rev-parse --show-toplevel)
+  head=$(git rev-parse -q --verify HEAD 2>/dev/null || true)
+  branch=$(git symbolic-ref -q --short HEAD || echo "(detached)")
+  upstream=$(git for-each-ref --format='%(upstream:short)' "refs/heads/$branch")
+  if [ -n "$upstream" ] && [ -n "$head" ]; then
+    read -r behind ahead < <(git rev-list --left-right --count "$upstream...HEAD")
+    unpushed=$(commits_json "$upstream..HEAD")
+  fi
+  base=$(base_ref || true)
+  if [ -n "$base" ] && [ -n "$head" ]; then
+    onbranch=$(commits_json "$base..HEAD")
+  fi
+  status=$(git status --porcelain)
+
+  jq -nc \
+    --arg top "$top" --arg branch "$branch" --arg head "$head" \
+    --arg upstream "$upstream" --arg base "$base" \
+    --argjson ahead "$ahead" --argjson behind "$behind" \
+    --argjson unpushed "$unpushed" --argjson onbranch "$onbranch" \
+    --argjson staged "$(printf '%s\n' "$status" | grep -c '^[MADRC]' || true)" \
+    --argjson unstaged "$(printf '%s\n' "$status" | grep -c '^.[MD]' || true)" \
+    --argjson untracked "$(printf '%s\n' "$status" | grep -c '^??' || true)" \
+    --argjson files "$(printf '%s\n' "$status" | grep -v '^$' | lines_to_json)" \
+    --argjson worktrees "$(worktrees_json)" \
+    --argjson pr "$(if [ "$branch" = "(detached)" ] || [ -z "$head" ]; then echo null; else pr_json "$head"; fi)" \
+    'def nonempty: if . == "" then null else . end;
+     {root: $top, branch: $branch, head: ($head[0:12] | nonempty),
+      upstream: ($upstream | nonempty), ahead: $ahead, behind: $behind,
+      note: "ahead/behind are as of the last fetch",
+      unpushed: $unpushed,
+      base: ($base | nonempty), commitsOnBranch: $onbranch,
+      uncommitted: {staged: $staged, unstaged: $unstaged, untracked: $untracked, files: $files},
+      worktrees: $worktrees, pr: $pr}'
+}
+
+repos=()
+skipped=()
+seen=" "
+for dir in "$@"; do
+  if ! top=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null); then
+    skipped+=("$dir")
+    continue
+  fi
+  case "$seen" in *" $top "*) continue ;; esac
+  seen="$seen$top "
+  r=$(cd "$top" && repo_json) || { echo "state: reading $top failed" >&2; exit 1; }
+  repos+=("$r")
+done
+
+[ ${#repos[@]} -gt 0 ] || { jq -nc --args '{repos: [], skipped: $ARGS.positional}' "$@"; exit 3; }
+printf '%s\n' "${repos[@]}" | jq -sc --args '{repos: ., skipped: $ARGS.positional}' ${skipped[@]+"${skipped[@]}"}
