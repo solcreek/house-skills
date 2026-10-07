@@ -22,10 +22,12 @@ printf '%s\n' "$GH_OUT"
 exit "${GH_EXIT:-0}"
 EOF
 chmod +x "$tmp/bin/gh"
-ln -s "$(command -v git)" "$tmp/nogh/git"
-ln -s "$(command -v jq)" "$tmp/nogh/jq"
-stubpath="$tmp/bin:$tmp/nogh:/usr/bin:/bin"
-noghpath="$tmp/nogh:/usr/bin:/bin"
+# Only the tools the script uses, so no system gh (in /usr/bin on CI runners)
+# leaks in. bash is /bin/bash: macOS's 3.2 is the one the script must run on.
+ln -s /bin/bash "$tmp/nogh/bash"
+for t in git jq head awk wc tr grep; do ln -s "$(command -v "$t")" "$tmp/nogh/$t"; done
+stubpath="$tmp/bin:$tmp/nogh"
+noghpath="$tmp/nogh"
 
 # A repo with an origin, main pushed, and a feature branch tracking origin.
 git init -q --bare -b main "$tmp/origin.git"
