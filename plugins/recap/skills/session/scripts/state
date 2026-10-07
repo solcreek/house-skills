@@ -84,12 +84,16 @@ pr_json() {
 
 # repo_json — the state of the repository the shell is in
 repo_json() {
-  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null status
+  local top branch head upstream ahead=null behind=null unpushed=null base onbranch=null status gone=false
   top=$(git rev-parse --show-toplevel)
   head=$(git rev-parse -q --verify HEAD 2>/dev/null || true)
   branch=$(git symbolic-ref -q --short HEAD || echo "(detached)")
   upstream=$(git for-each-ref --format='%(upstream:short)' "refs/heads/$branch")
-  if [ -n "$upstream" ] && [ -n "$head" ]; then
+  # A configured upstream that no longer resolves (deleted after merge, then
+  # pruned) is gone: report it, but count nothing against it.
+  if [ -n "$upstream" ] && ! git rev-parse -q --verify "$upstream^{commit}" >/dev/null; then
+    gone=true
+  elif [ -n "$upstream" ] && [ -n "$head" ]; then
     read -r behind ahead < <(git rev-list --left-right --count "$upstream...HEAD")
     unpushed=$(commits_json "$upstream..HEAD")
   fi
@@ -101,7 +105,7 @@ repo_json() {
 
   jq -nc \
     --arg top "$top" --arg branch "$branch" --arg head "$head" \
-    --arg upstream "$upstream" --arg base "$base" \
+    --arg upstream "$upstream" --argjson gone "$gone" --arg base "$base" \
     --argjson ahead "$ahead" --argjson behind "$behind" \
     --argjson unpushed "$unpushed" --argjson onbranch "$onbranch" \
     --argjson staged "$(printf '%s\n' "$status" | grep -c '^[MADRC]' || true)" \
@@ -112,7 +116,7 @@ repo_json() {
     --argjson pr "$(if [ "$branch" = "(detached)" ] || [ -z "$head" ]; then echo null; else pr_json "$head"; fi)" \
     'def nonempty: if . == "" then null else . end;
      {root: $top, branch: $branch, head: ($head[0:12] | nonempty),
-      upstream: ($upstream | nonempty), ahead: $ahead, behind: $behind,
+      upstream: ($upstream | nonempty), upstreamGone: $gone, ahead: $ahead, behind: $behind,
       note: "ahead/behind are as of the last fetch",
       unpushed: $unpushed,
       base: ($base | nonempty), commitsOnBranch: $onbranch,

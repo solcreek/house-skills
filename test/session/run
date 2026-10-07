@@ -121,6 +121,14 @@ check "no upstream: ahead, behind and unpushed are null" 0 \
   '.repos[0] | .upstream == null and .ahead == null and .unpushed == null and .commitsOnBranch == []' -- \
   env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/fresh"
 
+git -C "$tmp/fresh" checkout -qb merged
+git -C "$tmp/fresh" push -qu origin merged 2>/dev/null
+git -C "$tmp/fresh" push -q origin --delete merged 2>/dev/null
+git -C "$tmp/fresh" fetch -qp
+check "upstream gone after merge and prune: reported, nothing counted" 0 \
+  '.repos[0] | .upstream == "origin/merged" and .upstreamGone and .ahead == null and .unpushed == null' -- \
+  env PATH="$stubpath" GH_OUT="$GH_OUT" GH_EXIT="$GH_EXIT" "$state" "$tmp/fresh"
+
 git -C "$tmp/fresh" checkout -q --detach
 GH_OUT=$pr_open GH_EXIT=0
 check "detached HEAD: no PR lookup" 0 \
