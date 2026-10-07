@@ -58,6 +58,11 @@ pushes fixes. Copilot reviews are billed per review, so set
 `"BABYSIT_COPILOT": "never"` to stop the skill from asking at all; rulesets
 still trigger their own reviews.
 
+**After `gh pr create`.** When Claude opens a PR with `gh pr create`, a hook
+in the `dev` plugin has it offer `/dev:babysit-pr <url>`. It only suggests;
+the skill is manual-only and starts when you type it. Set
+`"BABYSIT_SUGGEST": "never"` to turn the suggestion off.
+
 Requirements: `gh` (authenticated), `jq`, `git`.
 
 **Permissions.** The skill pre-approves its own scripts, `git` and `gh`, but

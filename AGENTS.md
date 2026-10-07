@@ -11,6 +11,8 @@ Claude Code skills shared across the team, published as a plugin marketplace.
   never list them in `plugin.json`. Supporting files sit beside it in
   `references/` (read on demand) and `scripts/` (executed).
 - `test/<skill>/run` — a skill's tests; `bin/ci` runs them all.
+- `plugins/<plugin>/hooks/hooks.json` — plugin hooks, scripts beside it;
+  tested in `test/<plugin>-hooks/run`.
 
 Everything a plugin needs must live inside its directory: installs copy the
 plugin, not the repo.

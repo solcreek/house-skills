@@ -4,13 +4,13 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "==> Shell syntax"
-for f in "$root"/plugins/*/skills/*/scripts/* "$root"/test/*/run "$root"/bin/*; do
+for f in "$root"/plugins/*/skills/*/scripts/* "$root"/plugins/*/hooks/* "$root"/test/*/run "$root"/bin/*; do
   head -1 "$f" | grep -q bash || continue
   bash -n "$f"
 done
 
 echo "==> Executable bits"
-for f in "$root"/plugins/*/skills/*/scripts/* "$root"/test/*/run "$root"/bin/*; do
+for f in "$root"/plugins/*/skills/*/scripts/* "$root"/plugins/*/hooks/* "$root"/test/*/run "$root"/bin/*; do
   head -1 "$f" | grep -q '^#!' || continue
   [ -x "$f" ] || { echo "not executable: ${f#$root/}"; exit 1; }
 done
