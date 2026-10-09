@@ -147,9 +147,14 @@ for dir in "$@"; do
   for s in ${seen[@]+"${seen[@]}"}; do [ "$s" = "$top" ] && dup=true; done
   $dup && continue
   seen+=("$top")
-  # Bash clears -e inside $(...) and ignores it left of ||, so set it again
-  # in the subshell: a failed read must fail, not yield an empty field.
-  r=$(set -e; cd "$top"; repo_json) || { echo "state: reading $top failed" >&2; exit 1; }
+  # Bash clears -e inside $(...), so set it again in the subshell: a failed
+  # read must fail, not yield an empty field. Never left of ||: bash 5
+  # ignores -e there even when the subshell sets it.
+  set +e
+  r=$(set -e; cd "$top"; repo_json)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { echo "state: reading $top failed" >&2; exit 1; }
   repos+=("$r")
 done
 
