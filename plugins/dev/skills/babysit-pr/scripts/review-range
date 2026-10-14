@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# review-range BASE SINCE
+#
+# What step 5 reviews when SINCE..HEAD is not all the agent's own work. A merge
+# of the base branch brings the base's commits into the range: reviewing
+# SINCE..HEAD whole would review everything the base gained since the branch
+# last merged it (2,857 files once, around a one-file fix). The range is split
+# at each merge whose other parents are all on origin/BASE (an octopus that
+# also brings in another branch is not split at: that branch's changes would
+# fall between segments):
+#
+#   {"since": S, "segments": [{"since": A, "head": B}, ...], "merges": [M, ...]}
+#
+#   since     review S..HEAD with the reviewer: the commits after the last merge
+#   segments  the agent's commits before a merge, older first; each is reviewed
+#             as A..B by the subagent, which can take any range
+#   merges    each merge's own resolution, read with `git show --remerge-diff M`
+#             (empty when the merge resolved itself)
+#
+# With no such merge in the range: {"since": SINCE, "segments": [], "merges": []}.
+# The same when SINCE is the merge base of origin/BASE and HEAD (the default
+# for a PR never reviewed): SINCE..HEAD is then exactly the PR's own change,
+# even after earlier merges of the base, which leave SINCE off the first-parent
+# line.
+#
+# Exit codes: 0 the JSON above · 1 could not tell (origin/BASE missing, SINCE
+# not on HEAD's first-parent line; message on stderr) · 2 usage
+set -euo pipefail
+
+usage="usage: review-range BASE SINCE"
+base=${1:?$usage}
+since=${2:?$usage}
+[[ "$since" =~ ^[0-9a-f]{7,40}$ ]] || { echo "review-range: SINCE must be a commit sha" >&2; exit 2; }
+command -v jq >/dev/null || { echo "review-range needs jq" >&2; exit 1; }
+
+ref="refs/remotes/origin/$base"
+git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
+  || { echo "review-range: origin/$base not found; fetch it first" >&2; exit 1; }
+since=$(git rev-parse --verify --quiet "$since^{commit}") \
+  || { echo "review-range: $2 is not a commit here" >&2; exit 1; }
+git merge-base --is-ancestor "$since" HEAD \
+  || { echo "review-range: $since is not an ancestor of HEAD" >&2; exit 1; }
+if [ "$(git merge-base --all "$ref" HEAD)" = "$since" ]; then
+  jq -nc --arg since "$since" '{since: $since, segments: [], merges: []}'
+  exit 0
+fi
+# Segments are diffs along HEAD's first-parent line; from a SINCE off that line
+# (a commit merged in from a side branch) they would compare unrelated trees.
+git rev-list --first-parent HEAD | grep -x "$since" >/dev/null \
+  || { echo "review-range: $since is not on HEAD's first-parent line" >&2; exit 1; }
+
+# The branch's own line, oldest first, each commit with its parents.
+merges=()
+segments=()
+from=$since
+while read -r commit first others; do
+  [ -n "${others:-}" ] || continue
+  on_base=true
+  for p in $others; do
+    git merge-base --is-ancestor "$p" "$ref" || on_base=false
+  done
+  $on_base || continue
+  merges+=("$commit")
+  [ "$from" != "$first" ] && segments+=("$from $first")
+  from=$commit
+done < <(git rev-list --reverse --first-parent --parents "$since..HEAD")
+
+{
+  printf '%s\n' "${merges[@]+"${merges[@]}"}" | jq -R 'select(length > 0)' | jq -sc .
+  printf '%s\n' "${segments[@]+"${segments[@]}"}" | jq -R 'select(length > 0) | split(" ") | {since: .[0], head: .[1]}' | jq -sc .
+} | jq -sc --arg since "$from" '{since: $since, segments: .[1], merges: .[0]}'

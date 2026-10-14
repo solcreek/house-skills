@@ -99,7 +99,11 @@ then push **once**.
    **Declined** or **Flagged**, subject to [references/safety.md](references/safety.md).
    Read a Copilot review body in full: findings under "Previously missed"
    exist nowhere else, and its summary sentence ("no new comments") is not a
-   verdict. `alerts` are the PR's open code-scanning alerts; triage them only
+   verdict. When the body claims findings that no item carries ("five
+   moderate findings remain" over "0 open findings", or a headline naming
+   issues no item names), run `$S/copilot-candidates $R <branch> <the
+   review's commit>`: the locations Copilot weighed, from its run log, each
+   one triaged per [references/triage.md](references/triage.md). `alerts` are the PR's open code-scanning alerts; triage them only
    when `alerts_current` is true (code scanning has analysed this head and no
    check is running). Until then they may describe the previous push, where a
    fix you just made still looks unfixed. `alerts: null` means they could not
@@ -112,8 +116,19 @@ then push **once**.
    or the PR has had no review at all (`copilot.involved` false and
    `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
    `reviewed_sha`, else `copilot.reviewed_sha`, else
-   `git merge-base origin/$base HEAD`. Ask `$S/local-reviewer $base <since>`
-   who reviews:
+   `git merge-base origin/$base HEAD`. First split the range at merges of the
+   base, which would otherwise put everything the base gained under review:
+   `$S/review-range $base <since>` prints `{since, segments, merges}`.
+   - Its `since` replaces `<since>` below: the reviewer covers the commits
+     after the last base merge. When it equals `git rev-parse HEAD` (the
+     merge is the last commit), nothing is left for the reviewer: skip it.
+   - Each segment holds the agent's commits before a merge: review it with
+     the subagent, its `since` and `head` as `<SINCE>` and `<HEAD>`.
+   - Each merge's own resolution is `git show --remerge-diff <merge>`, empty
+     when the merge resolved itself: read it yourself, as a reviewer would.
+   - Exit 1 → review `<since>..HEAD` whole, and say why in the final report.
+
+   Then ask `$S/local-reviewer $base <since>` who reviews:
    - exit 0 → the repository declared its own reviewer: run its `command`
      exactly as printed, with a 10-minute Bash timeout. Exit 0 means the
      review is complete; read its findings as the repository's docs describe
