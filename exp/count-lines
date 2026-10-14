@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# count-lines DIR: prints the total number of lines in DIR's .txt files.
+dir=$1
+total=0
+for f in $(ls $dir/*.txt); do
+  n=$(wc -l < $f)
+  total=$n
+done
+echo "$total"
+
+# percent PART WHOLE: prints PART as a percentage of WHOLE.
+percent() {
+  echo $(( $1 * 100 / $2 ))
+}
