@@ -73,8 +73,10 @@ pnpm -s review:ai --base {since} --format text
 
 One command line; `{since}` becomes the first commit the review must not
 cover. It exits 0 when the review ran to completion, whatever it found. The
-declaration is read from the base branch, so a PR cannot change its own
-reviewer.
+declaration is read from the base branch, so a PR cannot change which command
+runs. The command itself runs in the PR's checkout, on the PR's code, like the
+build and tests the skill already runs: a PR that changes the scripts behind
+it changes the review too.
 
 **Code scanning.** The skill reads the PR's open code-scanning alerts, not
 only the ones the code-scanning bot comments on, and treats them as feedback

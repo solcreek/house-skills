@@ -13,8 +13,12 @@
 # must not cover. The command exits 0 when the review ran to completion,
 # whatever it found, and non-zero when it did not.
 #
-# The declaration is read from origin/BASE, never from the checkout: the pull
-# request under review must not be able to choose its own reviewer.
+# The declaration is read from origin/BASE, never from the checkout, so the
+# pull request under review cannot change which command runs. It does not pin
+# what the command does: the command runs in the checkout, so scripts it calls
+# (a package.json script, a bin/ file) are the PR's own, like the build and
+# tests the skill already runs. This guards against a PR swapping or dropping
+# its reviewer, not against a PR that rewrites the review tool.
 #
 # Prints one JSON line. Exit codes:
 #   0  {"command": "...", "source": "AGENTS.md"} — run this command

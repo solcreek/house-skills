@@ -115,7 +115,9 @@ then push **once**.
      review is complete; read its findings as the repository's docs describe
      its output. Non-zero → run it once more; failing again, the range is not
      reviewed: Flag that with the output's last lines, and post no `reviewed`
-     marker.
+     marker. The command runs the PR's own code: never change the files
+     behind it to quiet a finding, and if the PR changes them, say so in the
+     final report.
    - exit 3 → nothing declared: launch one read-only subagent with
      [references/local-review.md](references/local-review.md).
    - exit 4 → the declaration on the base branch is broken: use the

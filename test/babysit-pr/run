@@ -331,7 +331,7 @@ reviewer "a declaration in AGENTS.md is used, {since} filled in" 0 \
   '.command == "pnpm -s review:ai --base '"$OLD"' --format text" and .source == "AGENTS.md"'
 printf '%s\n' "$FENCE""babysit-pr-reviewer" "make evil-review {since}" "$FENCE" > "$repo/AGENTS.md"
 gitr commit -qam "the PR changes its reviewer"
-reviewer "the checkout cannot change the reviewer: origin/BASE decides" 0 '.command | startswith("pnpm -s review:ai")'
+reviewer "the checkout cannot change the reviewer command: origin/BASE decides" 0 '.command | startswith("pnpm -s review:ai")'
 on_base REVIEW.md "$FENCE""babysit-pr-reviewer
 bin/review {since}
 $FENCE"
