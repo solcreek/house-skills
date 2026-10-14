@@ -9,8 +9,11 @@
 #   CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=27, end=29, fixed=false, severity=moderate)
 #
 # Prints NDJSON, one candidate per line, duplicates dropped:
-#   {"path": "a.ts", "start": 27, "end": 29, "type": "bug", "severity": "moderate"}
-# Candidates include the ones Copilot did post as threads.
+#   {"path": "a.ts", "start": 27, "end": 29, "type": "bug", "severity": "moderate", "fixed": false}
+# Candidates include the ones Copilot did post as threads. `fixed` is the log's
+# own flag, null when absent or not true/false; of 294 stored lines across 64
+# runs none read true (2026-10-13), so what true means is unobserved. A
+# location stored twice keeps its fixed=false entry.
 #
 # The log is CI output of a trusted review bot, but it can echo what the PR
 # put there, so only a line the agent itself wrote counts — a log line's
@@ -52,8 +55,10 @@ out=$(jq -Rnc '[inputs | split(", ") | map(capture("^(?<key>[a-z_]+)=(?<value>.*
         | map(select((.file // "" | test("^[^[:space:][:cntrl:]]+$") and (test("^/|(^|/)\\.\\.?(/|$)") | not))
                      and (.start // "" | test("^[0-9]+$")) and (.end // "" | test("^[0-9]+$"))
                      and (.type // "" | test("^[a-z_]+$")) and (.severity // "" | test("^[a-z_]+$")))
-              | {path: .file, start: (.start | tonumber), end: (.end | tonumber), type, severity})
-        | {dropped: ($n - length), candidates: unique_by([.path, .start, .end, .type])}' <<<"$stored")
+              | {path: .file, start: (.start | tonumber), end: (.end | tonumber), type, severity,
+                 fixed: ({"true": true, "false": false}[.fixed // ""])})
+        | {dropped: ($n - length),
+           candidates: group_by([.path, .start, .end, .type]) | map(min_by(.fixed == true))}' <<<"$stored")
 dropped=$(jq -r .dropped <<<"$out")
 [ "$dropped" -eq 0 ] || echo "copilot-candidates: dropped $dropped stored line(s) that were not a plain location" >&2
 jq -c '.candidates[]' <<<"$out"
