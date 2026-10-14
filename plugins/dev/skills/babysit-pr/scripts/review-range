@@ -16,6 +16,10 @@
 #             (empty when the merge resolved itself)
 #
 # With no such merge in the range: {"since": SINCE, "segments": [], "merges": []}.
+# The same when SINCE is the merge base of origin/BASE and HEAD (the default
+# for a PR never reviewed): SINCE..HEAD is then exactly the PR's own change,
+# even after earlier merges of the base, which leave SINCE off the first-parent
+# line.
 #
 # Exit codes: 0 the JSON above · 1 could not tell (origin/BASE missing, SINCE
 # not on HEAD's first-parent line; message on stderr) · 2 usage
@@ -34,6 +38,10 @@ since=$(git rev-parse --verify --quiet "$since^{commit}") \
   || { echo "review-range: $2 is not a commit here" >&2; exit 1; }
 git merge-base --is-ancestor "$since" HEAD \
   || { echo "review-range: $since is not an ancestor of HEAD" >&2; exit 1; }
+if [ "$(git merge-base --all "$ref" HEAD)" = "$since" ]; then
+  jq -nc --arg since "$since" '{since: $since, segments: [], merges: []}'
+  exit 0
+fi
 # Segments are diffs along HEAD's first-parent line; from a SINCE off that line
 # (a commit merged in from a side branch) they would compare unrelated trees.
 git rev-list --first-parent HEAD | grep -x "$since" >/dev/null \

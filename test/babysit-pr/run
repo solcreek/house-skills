@@ -438,6 +438,9 @@ M2=$(merge_base)
 f4=$(commit f4)
 ranged "two merges: a segment before each, the reviewer after the last" "$f1" \
   '. == {since: "'"$M2"'", segments: [{since: "'"$f1"'", head: "'"$f2"'"}, {since: "'"$M1"'", head: "'"$f3"'"}], merges: ["'"$M1"'", "'"$M2"'"]}'
+mb=$(gitg merge-base origin/main feat)
+ranged "the merge base as SINCE needs no split, though merges left it off the first-parent line" "$mb" \
+  '. == {since: "'"$mb"'", segments: [], merges: []}'
 gitg switch -q -c side "$f1"
 s1=$(commit s1)
 gitg switch -q feat
