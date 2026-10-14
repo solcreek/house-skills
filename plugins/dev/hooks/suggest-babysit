@@ -26,7 +26,7 @@ for opener in "${openers[@]+"${openers[@]}"}"; do
   [ "${#words[@]}" -gt 0 ] || continue
   re=""
   for w in "${words[@]}"; do
-    w=$(sed 's/[][\\.*^$+?(){}|/]/\\&/g' <<<"$w")
+    w=$(sed 's/[][\\.*^$+?(){}|]/\\&/g' <<<"$w")
     re+="${re:+[[:space:]]+}$w"
   done
   opens+="|(^|[^[:alnum:]_.-])$re([^[:alnum:]_-]|\$)"

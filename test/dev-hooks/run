@@ -8,6 +8,8 @@ hook="$root/plugins/dev/hooks/suggest-babysit"
 URL=https://github.com/solcreek/x/pull/7
 pass=0
 fail=0
+errf=$(mktemp)
+trap 'rm -f "$errf"' EXIT
 
 # payload COMMAND STDOUT — a PostToolUse payload for a Bash call
 payload() {
@@ -16,15 +18,18 @@ payload() {
 }
 
 # check NAME EXPECTED-URL-OR-EMPTY COMMAND STDOUT [ENV...]
+# The hook runs on every Bash call, so it must also stay silent on stderr.
 check() {
-  local name=$1 want=$2 out got code=0
-  out=$(payload "$3" "$4" | env "${@:5}" "$hook") || code=$?
+  local name=$1 want=$2 out got err code=0
+  out=$(payload "$3" "$4" | env "${@:5}" "$hook" 2>"$errf") || code=$?
+  err=$(cat "$errf")
   got=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"${out:-null}" |
     grep -Eo 'https://[^ `]+/pull/[0-9]+' | head -1 || true)
-  if [ "$code" -eq 0 ] && [ "$got" = "$want" ]; then
+  if [ "$code" -eq 0 ] && [ "$got" = "$want" ] && [ -z "$err" ]; then
     echo "ok   $name"; pass=$((pass + 1))
   else
     echo "FAIL $name"; echo "     exit $code, want '$want', got '$got'"; echo "     output: $out"
+    [ -z "$err" ] || echo "     stderr: $err"
     fail=$((fail + 1))
   fi
 }
@@ -53,6 +58,7 @@ check "a longer last word is not the opener"  ""     "bin/mk pr openx" "$URL" "$
 check "a word ending in the opener is not it"  ""     "bin/xmk pr open" "$URL" "$O"
 check "undeclared, the wrapper is ignored"    ""     "bin/mk pr open" "$URL"
 check "a regex character in an opener is literal" "" "bin/mkk pr open" "$URL" "BABYSIT_PR_OPENERS=m.k pr open"
+check "an opener named by its path"           "$URL" "bin/mk pr open" "$URL" "BABYSIT_PR_OPENERS=bin/mk pr open"
 check "gh still works beside openers"         "$URL" "gh pr create --fill" "$URL" "$O"
 check "an empty opener list changes nothing"  "$URL" "gh pr create --fill" "$URL" "BABYSIT_PR_OPENERS= , "
 
