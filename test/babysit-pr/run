@@ -425,36 +425,36 @@ gitg switch -q -c feat
 f1=$(commit f1)
 f2=$(commit f2)
 ranged "no merge: the whole range goes to the reviewer" "$f1" \
-  '. == {since: "'"$f1"'", segments: [], merges: []}'
+  'del(.reviewer) == {since: "'"$f1"'", segments: [], merges: []}'
 base_moves m1
 M1=$(merge_base)
 ranged "a merge right after SINCE: only the commits after it, plus its resolution" "$f2" \
-  '. == {since: "'"$M1"'", segments: [], merges: ["'"$M1"'"]}'
+  'del(.reviewer) == {since: "'"$M1"'", segments: [], merges: ["'"$M1"'"]}'
 f3=$(commit f3)
 ranged "own commits before the merge become a segment" "$f1" \
-  '. == {since: "'"$M1"'", segments: [{since: "'"$f1"'", head: "'"$f2"'"}], merges: ["'"$M1"'"]}'
+  'del(.reviewer) == {since: "'"$M1"'", segments: [{since: "'"$f1"'", head: "'"$f2"'"}], merges: ["'"$M1"'"]}'
 base_moves m2
 M2=$(merge_base)
 f4=$(commit f4)
 ranged "two merges: a segment before each, the reviewer after the last" "$f1" \
-  '. == {since: "'"$M2"'", segments: [{since: "'"$f1"'", head: "'"$f2"'"}, {since: "'"$M1"'", head: "'"$f3"'"}], merges: ["'"$M1"'", "'"$M2"'"]}'
+  'del(.reviewer) == {since: "'"$M2"'", segments: [{since: "'"$f1"'", head: "'"$f2"'"}, {since: "'"$M1"'", head: "'"$f3"'"}], merges: ["'"$M1"'", "'"$M2"'"]}'
 mb=$(gitg merge-base origin/main feat)
 ranged "the merge base as SINCE needs no split, though merges left it off the first-parent line" "$mb" \
-  '. == {since: "'"$mb"'", segments: [], merges: []}'
+  'del(.reviewer) == {since: "'"$mb"'", segments: [], merges: []}'
 gitg switch -q -c side "$f1"
 s1=$(commit s1)
 gitg switch -q feat
 gitg merge -q --no-ff -m "merge side" side
 f5=$(commit f5)
 ranged "a merge of a branch that is not the base does not split the range" "$f4" \
-  '. == {since: "'"$f4"'", segments: [], merges: []}'
+  'del(.reviewer) == {since: "'"$f4"'", segments: [], merges: []}'
 gitg switch -q -c side2 "$f5"
 commit s2 >/dev/null
 base_moves m4
 gitg merge -q --no-ff -m "merge main and side2" origin/main side2
 commit f6 >/dev/null
 ranged "an octopus of the base and another branch does not split the range" "$f5" \
-  '. == {since: "'"$f5"'", segments: [], merges: []}'
+  'del(.reviewer) == {since: "'"$f5"'", segments: [], merges: []}'
 rc=0; out=$(cd "$range" && "$rr" main "$s1" 2>&1) || rc=$?
 if [ "$rc" -eq 1 ] && grep -q "first-parent" <<<"$out"; then
   echo "ok   SINCE off the first-parent line is a failure: its segments would mean nothing"; pass=$((pass + 1))
@@ -470,6 +470,19 @@ rc=0; out=$(cd "$range" && "$rr" nope "$f1" 2>&1) || rc=$?
 if [ "$rc" -eq 1 ] && grep -q "not found" <<<"$out"; then
   echo "ok   a missing origin/BASE is a failure"; pass=$((pass + 1))
 else echo "FAIL missing base: exit $rc: $out"; fail=$((fail + 1)); fi
+ranged "nothing declared: the subagent, and why" "$f1" \
+  '.reviewer == {kind: "subagent", why: "nothing declared"}'
+gitg switch -q main
+printf '%s\n' '```babysit-pr-reviewer' 'bin/review --base {since}' '```' > "$range/REVIEW.md"
+gitg add REVIEW.md && gitg commit -qm review && gitg update-ref refs/remotes/origin/main main
+gitg switch -q feat
+ranged "a declared reviewer comes back with the split's since filled in" "$f1" \
+  '.since != "'"$f1"'" and .reviewer == {kind: "repository", command: ("bin/review --base " + .since), source: "REVIEW.md"}'
+gitg switch -q main
+printf '%s\n' '```babysit-pr-reviewer' 'bin/review --all' '```' > "$range/REVIEW.md"
+gitg commit -qam "break the reviewer" && gitg update-ref refs/remotes/origin/main main && gitg switch -q feat
+ranged "a broken declaration falls back to the subagent, saying why" "$f1" \
+  '.reviewer.kind == "subagent" and (.reviewer.why | test("must take [{]since[}]"))'
 
 echo "== copilot-candidates"
 cc="$root/plugins/dev/skills/babysit-pr/scripts/copilot-candidates"
