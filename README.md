@@ -85,7 +85,16 @@ once the analysis has finished. It never dismisses an alert.
 **After `gh pr create`.** When Claude opens a PR with `gh pr create`, a hook
 in the `dev` plugin has it offer `/dev:babysit-pr <url>`. It only suggests;
 the skill is manual-only and starts when you type it. Set
-`"BABYSIT_SUGGEST": "never"` to turn the suggestion off.
+`"BABYSIT_SUGGEST": "never"` to turn the suggestion off. A repository that
+opens PRs through its own wrapper names it in `BABYSIT_PR_OPENERS`,
+comma-separated, for example in the repository's `.claude/settings.json`:
+
+```json
+{ "env": { "BABYSIT_PR_OPENERS": "mk pr open" } }
+```
+
+A wrapper called by path (`bin/mk pr open`) matches too; the suggestion still
+needs a PR URL in the command's output.
 
 Requirements: `gh` (authenticated), `jq`, `git`.
 
