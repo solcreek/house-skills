@@ -448,6 +448,13 @@ gitg merge -q --no-ff -m "merge side" side
 f5=$(commit f5)
 ranged "a merge of a branch that is not the base does not split the range" "$f4" \
   '. == {since: "'"$f4"'", segments: [], merges: []}'
+gitg switch -q -c side2 "$f5"
+commit s2 >/dev/null
+base_moves m4
+gitg merge -q --no-ff -m "merge main and side2" origin/main side2
+commit f6 >/dev/null
+ranged "an octopus of the base and another branch does not split the range" "$f5" \
+  '. == {since: "'"$f5"'", segments: [], merges: []}'
 rc=0; out=$(cd "$range" && "$rr" main "$s1" 2>&1) || rc=$?
 if [ "$rc" -eq 1 ] && grep -q "first-parent" <<<"$out"; then
   echo "ok   SINCE off the first-parent line is a failure: its segments would mean nothing"; pass=$((pass + 1))

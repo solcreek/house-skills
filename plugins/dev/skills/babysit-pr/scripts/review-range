@@ -5,7 +5,9 @@
 # of the base branch brings the base's commits into the range: reviewing
 # SINCE..HEAD whole would review everything the base gained since the branch
 # last merged it (2,857 files once, around a one-file fix). The range is split
-# at each merge whose other parent is on origin/BASE:
+# at each merge whose other parents are all on origin/BASE (an octopus that
+# also brings in another branch is not split at: that branch's changes would
+# fall between segments):
 #
 #   {"since": S, "segments": [{"since": A, "head": B}, ...], "merges": [M, ...]}
 #
@@ -53,9 +55,9 @@ segments=()
 from=$since
 while read -r commit first others; do
   [ -n "${others:-}" ] || continue
-  on_base=false
+  on_base=true
   for p in $others; do
-    git merge-base --is-ancestor "$p" "$ref" && on_base=true
+    git merge-base --is-ancestor "$p" "$ref" || on_base=false
   done
   $on_base || continue
   merges+=("$commit")
