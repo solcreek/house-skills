@@ -42,13 +42,16 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # answer SINCE MERGES-JSON SEGMENTS-JSON — prints the result with its reviewer
 answer() {
-  local out rc=0 reviewer
-  out=$("$here/local-reviewer" "$base" "$1" 2>&1) || rc=$?
+  local out err rc=0 reviewer
+  # stdout and stderr apart: a git warning on stderr must not reach the JSON.
+  err=$(mktemp)
+  out=$("$here/local-reviewer" "$base" "$1" 2>"$err") || rc=$?
   case $rc in
     0) reviewer=$(jq -c '{kind: "repository"} + .' <<<"$out") ;;
     3) reviewer='{"kind": "subagent", "why": "nothing declared"}' ;;
-    *) reviewer=$(jq -nc --arg why "$out" '{kind: "subagent", why: $why}') ;;
+    *) reviewer=$(jq -nc --arg why "$(tail -n 1 "$err")" '{kind: "subagent", why: $why}') ;;
   esac
+  rm -f "$err"
   jq -nc --arg since "$1" --argjson merges "$2" --argjson segments "$3" --argjson reviewer "$reviewer" \
     '{since: $since, segments: $segments, merges: $merges, reviewer: $reviewer}'
 }

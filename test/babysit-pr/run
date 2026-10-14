@@ -478,6 +478,10 @@ gitg add REVIEW.md && gitg commit -qm review && gitg update-ref refs/remotes/ori
 gitg switch -q feat
 ranged "a declared reviewer comes back with the split's since filled in" "$f1" \
   '.since != "'"$f1"'" and .reviewer == {kind: "repository", command: ("bin/review --base " + .since), source: "REVIEW.md"}'
+rc=0; out=$(cd "$range" && GIT_TRACE=1 "$rr" main "$f1" 2>/dev/null) || rc=$?
+if [ "$rc" -eq 0 ] && jq -e '.reviewer.kind == "repository"' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   git's stderr does not break the declared reviewer"; pass=$((pass + 1))
+else echo "FAIL stderr noise: exit $rc: $out"; fail=$((fail + 1)); fi
 gitg switch -q main
 printf '%s\n' '```babysit-pr-reviewer' 'bin/review --all' '```' > "$range/REVIEW.md"
 gitg commit -qam "break the reviewer" && gitg update-ref refs/remotes/origin/main main && gitg switch -q feat
