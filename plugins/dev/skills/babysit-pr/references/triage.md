@@ -68,7 +68,8 @@ findings are evidence about the approach, not a queue.
   without its text. Open each one and judge the code there as if it were a
   finding; a candidate at a thread's location is that thread. Report them as
   a group in the summary: which were real and fixed, and why each other one
-  is not.
+  is not. A stderr line saying lines were dropped (not a plain location)
+  goes in the final report: those candidates went unchecked.
 - **PR comments** — a member's request or a bot's findings. A status or
   informational comment needs no outcome; still list its id in `handled` so it
   stops resurfacing.

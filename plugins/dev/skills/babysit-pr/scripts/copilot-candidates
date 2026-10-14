@@ -12,8 +12,11 @@
 #   {"path": "a.ts", "start": 27, "end": 29, "type": "bug", "severity": "moderate"}
 # Candidates include the ones Copilot did post as threads.
 #
-# The log is CI output of a trusted review bot, read like any check log; it
-# carries file names and numbers, no prose.
+# The log is CI output of a trusted review bot, but it can echo what the PR
+# put there, so only a line the agent itself wrote counts — a log line's
+# timestamp, then the marker — and only its locations reach the caller: a path
+# with no whitespace or control characters, numeric lines, a lower-case type
+# and severity. A line that fails this is dropped and counted on stderr.
 #
 # Exit codes: 0 the candidates (none is an empty answer) · 3 no completed
 # Copilot run for COMMIT, or its log has expired · 1 a read failed · 2 usage
@@ -37,9 +40,19 @@ run=$(jq -r '[.workflow_runs[]? | select(.path == "dynamic/agents/copilot-pull-r
 # terminal escape sequences, which this log does.
 log=$(gh run view "$run" --repo "$repo" --log 2>/dev/null) || { echo "{\"run\": $run, \"log\": null}"; exit 3; }
 
-stored=$(grep -o 'CCR Agent: Comment stored ([^)]*)' <<<"$log" || true)
+# gh prints "job<TAB>step<TAB><timestamp> <message>"; the message may open
+# with colour codes.
+tab=$'\t' esc=$'\e'
+marker="^[^$tab]*$tab[^$tab]*$tab[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ($esc\\[[0-9;]*m)*CCR Agent: Comment stored \\("
+stored=$(grep -E "$marker[^)]*\\)" <<<"$log" | sed -E -e "s/$marker//" -e 's/\).*$//' || true)
 [ -n "$stored" ] || exit 0
-sed -e 's/^CCR Agent: Comment stored (//' -e 's/)$//' <<<"$stored" \
-  | jq -Rc 'split(", ") | map(capture("^(?<key>[a-z_]+)=(?<value>.*)$")) | from_entries
-            | {path: .file, start: (.start | tonumber? // null), end: (.end | tonumber? // null), type, severity}' \
-  | jq -sc 'unique_by([.path, .start, .end, .type]) | .[]'
+out=$(jq -Rnc '[inputs | split(", ") | map(capture("^(?<key>[a-z_]+)=(?<value>.*)$")) | from_entries]
+        | length as $n
+        | map(select((.file // "" | test("^[^[:space:][:cntrl:]]+$"))
+                     and (.start // "" | test("^[0-9]+$")) and (.end // "" | test("^[0-9]+$"))
+                     and (.type // "" | test("^[a-z_]+$")) and (.severity // "" | test("^[a-z_]+$")))
+              | {path: .file, start: (.start | tonumber), end: (.end | tonumber), type, severity})
+        | {dropped: ($n - length), candidates: unique_by([.path, .start, .end, .type])}' <<<"$stored")
+dropped=$(jq -r .dropped <<<"$out")
+[ "$dropped" -eq 0 ] || echo "copilot-candidates: dropped $dropped stored line(s) that were not a plain location" >&2
+jq -c '.candidates[]' <<<"$out"
