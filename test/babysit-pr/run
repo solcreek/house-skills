@@ -373,6 +373,11 @@ on_base REVIEW.md "~~~ babysit-pr-reviewer
   bin/review {since}
 ~~~"
 reviewer "a tilde fence declares too, and the line is trimmed" 0 '.command == "bin/review '"$OLD"'"'
+# A partial clone without the blob: present on the base, but unreadable.
+blob=$(gitr rev-parse "refs/remotes/origin/main:REVIEW.md")
+mv "$repo/.git/objects/${blob:0:2}/${blob:2}" "$tmp/blob"
+reviewer_fails "a declaration file that cannot be read is a failure to look" 1 "could not read REVIEW.md"
+mv "$tmp/blob" "$repo/.git/objects/${blob:0:2}/${blob:2}"
 rc=0; out=$(cd "$repo" && "$lr" main 'HEAD;rm' 2>&1) || rc=$?
 if [ "$rc" -eq 2 ]; then echo "ok   SINCE must be a sha"; pass=$((pass + 1))
 else echo "FAIL SINCE must be a sha: exit $rc: $out"; fail=$((fail + 1)); fi

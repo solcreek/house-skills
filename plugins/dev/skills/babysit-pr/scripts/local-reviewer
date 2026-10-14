@@ -25,7 +25,8 @@
 #   3  {"declared": false} — nothing declared; use the subagent
 #   4  a broken declaration: not exactly one command line, or one without
 #      {since} (message on stderr)
-#   1  could not look: origin/BASE missing, or jq missing (message on stderr)
+#   1  could not look: origin/BASE missing, a file on it unreadable, or jq
+#      missing (message on stderr)
 #   2  usage
 set -euo pipefail
 
@@ -66,7 +67,13 @@ declarations() {
 }
 
 for file in REVIEW.md AGENTS.md CLAUDE.md; do
-  text=$(git show "$ref:$file" 2>/dev/null) || continue
+  # Absent is "nothing here"; present but unreadable (a partial clone missing
+  # the blob) is "could not look", never "nothing declared".
+  listed=$(git ls-tree --name-only "$ref" -- "$file") \
+    || { echo "local-reviewer: could not list origin/$base" >&2; exit 1; }
+  [ -n "$listed" ] || continue
+  text=$(git show "$ref:$file") \
+    || { echo "local-reviewer: could not read $file on origin/$base" >&2; exit 1; }
   found=$(declarations <<<"$text")
   blocks=$(grep -c '^O$' <<<"$found" || true)
   [ "$blocks" -eq 0 ] && continue
