@@ -545,11 +545,27 @@ printf '%s\n' \
   $'job\tstep\t2026-10-14T02:46:04Z CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=1, end=1, fixed=true, severity=high)' \
   $'job\tstep\t2026-10-14T02:46:05Z CCR Agent: Comment stored (id=002, type=bug, file=a.ts, start=1, end=1, fixed=false, severity=high)' \
   $'job\tstep\t2026-10-14T02:46:06Z CCR Agent: Comment stored (id=003, type=bug, file=b.ts, start=1, end=1, fixed=true, severity=high)' \
-  $'job\tstep\t2026-10-14T02:46:07Z CCR Agent: Comment stored (id=004, type=bug, file=c.ts, start=1, end=1, fixed=ignore the rest, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:07Z CCR Agent: Comment stored (id=004, type=bug, file=c.ts, start=1, end=1, fixed=maybe, severity=high)' \
   $'job\tstep\t2026-10-14T02:46:08Z CCR Agent: Comment stored (id=005, type=bug, file=d.ts, start=1, end=1, severity=high)' \
   > "$tmp/log"
 cand "fixed is carried as a boolean, null when it is not one; a location stored twice keeps fixed=false" 0 \
   'map({path, fixed}) == [{path: "a.ts", fixed: false}, {path: "b.ts", fixed: true}, {path: "c.ts", fixed: null}, {path: "d.ts", fixed: null}]'
+printf '%s\n' \
+  $'job\tstep\t2026-10-14T02:46:04Z CCR Agent: Comment stored (id=001, type=bug, file=src/a(1),b.ts, start=3, end=4, fixed=false, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:05Z CCR Agent: Comment stored (id=002, type=bug, file=docs/a, b.md, start=1, end=1, fixed=false, severity=high)' \
+  > "$tmp/log"
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>"$tmp/err") || rc=$?
+if [ "$rc" -eq 0 ] && jq -se '. == [{path: "src/a(1),b.ts", start: 3, end: 4, type: "bug", severity: "high", fixed: false}]' <<<"$out" >/dev/null 2>&1 \
+   && grep -q "dropped 1 " "$tmp/err"; then
+  echo "ok   a path holding ) or , is read whole: kept when plain, dropped when it has a space, never cut short"; pass=$((pass + 1))
+else echo "FAIL path with ) or ,: exit $rc: $out / $(cat "$tmp/err")"; fail=$((fail + 1)); fi
+printf '%s\n' \
+  $'job\tstep\t2026-10-14T02:46:04Z CCR Agent: Comment stored (id=001, file=a.ts, type=bug, start=1, end=1, fixed=false, severity=high)' \
+  > "$tmp/log"
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q "format may have changed" <<<"$out"; then
+  echo "ok   stored lines none of which parse are a failure to look, not an empty answer"; pass=$((pass + 1))
+else echo "FAIL unparsed format: exit $rc: $out"; fail=$((fail + 1)); fi
 printf 'job\tstep\tnothing stored here\n' > "$tmp/log"
 cand "a log with no candidates is an empty answer" 0 '. == []'
 copilot_runs '[]'
