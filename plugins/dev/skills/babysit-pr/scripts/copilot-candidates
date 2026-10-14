@@ -8,22 +8,32 @@
 #
 #   CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=27, end=29, fixed=false, severity=moderate)
 #
-# Prints NDJSON, one candidate per line, duplicates dropped:
-#   {"path": "a.ts", "start": 27, "end": 29, "type": "bug", "severity": "moderate", "fixed": false}
-# Candidates include the ones Copilot did post as threads. `fixed` is the log's
-# own flag, null when absent or not true/false; of 294 stored lines across 64
-# runs none read true (2026-10-13), so what true means is unobserved. A
-# location stored twice keeps its fixed=false entry.
+# Prints NDJSON, one candidate per location (path and lines):
+#   {"path": "a.ts", "start": 27, "end": 29, "types": ["bug"], "severities": ["moderate"], "fixed": false}
+# Candidates include the ones Copilot did post as threads. Copilot often
+# stores a location again under another type (it removes and re-adds a
+# candidate to amend it, and parallel passes store the same one), so a
+# location carries every type and severity it was stored with. `fixed` is the
+# log's own flag: false if any entry says false, else true if one says true,
+# else null; of 294 stored lines across 64 runs none read true (2026-10-13),
+# so what true means is unobserved.
+#
+# Removals ("CCR Agent: Comment removal attempted (id=…)") are not applied:
+# ids restart in each parallel pass and the log names no pass, so a removal
+# cannot be tied to one candidate, and most re-add the same location.
 #
 # The log is CI output of a trusted review bot, but it can echo what the PR
 # put there, so only a line the agent itself wrote counts — a log line's
 # timestamp, then the marker — and only its locations reach the caller: a
 # relative path inside the checkout (no whitespace or control characters, no
 # leading /, no . or .. component), numeric lines, a lower-case type and
-# severity. A line that fails this is dropped and counted on stderr.
+# severity. The fields are read in the log's own order, as one pattern, so a
+# path holding ", " or ")" is read whole rather than cut short. A line that
+# fails this is dropped and counted on stderr.
 #
 # Exit codes: 0 the candidates (none is an empty answer) · 3 no completed
-# Copilot run for COMMIT, or its log has expired · 1 a read failed · 2 usage
+# Copilot run for COMMIT, or its log has expired · 1 a read failed, or no
+# stored line parsed (the log's format changed) · 2 usage
 set -euo pipefail
 
 usage="usage: copilot-candidates OWNER/REPO BRANCH COMMIT"
@@ -48,17 +58,23 @@ log=$(gh run view "$run" --repo "$repo" --log 2>/dev/null) || { echo "{\"run\": 
 # with colour codes.
 tab=$'\t' esc=$'\e'
 marker="^[^$tab]*$tab[^$tab]*$tab[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ($esc\\[[0-9;]*m)*CCR Agent: Comment stored \\("
-stored=$(grep -E "$marker[^)]*\\)" <<<"$log" | sed -E -e "s/$marker//" -e 's/\).*$//' || true)
+stored=$(grep -E "$marker.*\\)" <<<"$log" | sed -E -e "s/$marker//" -e 's/\)[^)]*$//' || true)
 [ -n "$stored" ] || exit 0
-out=$(jq -Rnc '[inputs | split(", ") | map(capture("^(?<key>[a-z_]+)=(?<value>.*)$")) | from_entries]
+out=$(jq -Rnc '[inputs | capture("^id=[0-9]+, type=(?<type>[a-z_]+), file=(?<file>.*), start=(?<start>[0-9]+), end=(?<end>[0-9]+)(, fixed=(?<fixed>[a-z]+))?, severity=(?<severity>[a-z_]+)$") // {}]
         | length as $n
-        | map(select((.file // "" | test("^[^[:space:][:cntrl:]]+$") and (test("^/|(^|/)\\.\\.?(/|$)") | not))
-                     and (.start // "" | test("^[0-9]+$")) and (.end // "" | test("^[0-9]+$"))
-                     and (.type // "" | test("^[a-z_]+$")) and (.severity // "" | test("^[a-z_]+$")))
+        | (map(select(.file)) | length) as $parsed
+        | map(select(.file // "" | test("^[^[:space:][:cntrl:]]+$") and (test("^/|(^|/)\\.\\.?(/|$)") | not))
               | {path: .file, start: (.start | tonumber), end: (.end | tonumber), type, severity,
                  fixed: ({"true": true, "false": false}[.fixed // ""])})
-        | {dropped: ($n - length),
-           candidates: group_by([.path, .start, .end, .type]) | map(min_by(.fixed == true))}' <<<"$stored")
+        | {parsed: $parsed, dropped: ($n - length),
+           candidates: (group_by([.path, .start, .end])
+             | map({path: .[0].path, start: .[0].start, end: .[0].end,
+                    types: (map(.type) | unique), severities: (map(.severity) | unique),
+                    fixed: (map(.fixed) | if any(. == false) then false elif any(. == true) then true else null end)}))}' <<<"$stored")
 dropped=$(jq -r .dropped <<<"$out")
+if [ "$(jq .parsed <<<"$out")" -eq 0 ]; then
+  echo "copilot-candidates: none of $dropped stored line(s) parsed; the log's format may have changed" >&2
+  exit 1
+fi
 [ "$dropped" -eq 0 ] || echo "copilot-candidates: dropped $dropped stored line(s) that were not a plain location" >&2
 jq -c '.candidates[]' <<<"$out"

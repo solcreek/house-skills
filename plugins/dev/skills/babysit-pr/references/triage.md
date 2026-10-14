@@ -64,12 +64,12 @@ findings are evidence about the approach, not a queue.
   overview groups them: "Open" items also have threads (answer them there),
   "Previously missed" items exist only in the body. A body that claims
   findings no item carries has them in Copilot's run log:
-  `copilot-candidates` lists each location (path, lines, type, severity, and
-  Copilot's own `fixed` flag) without its text. Open each one and judge the
-  code there as if it were a finding, `fixed: true` included: that flag is
-  Copilot's claim, not a verdict. A candidate at a thread's location is that
-  thread. Report them as
-  a group in the summary: which were real and fixed, and why each other one
+  `copilot-candidates` lists each location (path, lines, every type and
+  severity it was stored with, and Copilot's own `fixed` flag) without its
+  text. Open each one and judge the code there as if it were a finding,
+  `fixed: true` included: that flag is Copilot's claim, not a verdict. A
+  candidate at a thread's location is that thread. Report them as a group in
+  the summary: which were real and fixed, and why each other one
   is not. A stderr line saying lines were dropped (not a plain location)
   goes in the final report: those candidates went unchecked.
 - **PR comments** — a member's request or a bot's findings. A status or
