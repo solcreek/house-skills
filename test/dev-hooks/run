@@ -55,6 +55,8 @@ check "a second declared opener"              "$URL" "./bin/maneki pr open" "$UR
 check "an opener's other subcommand is ignored" "" "bin/mk pr view" "$URL" "$O"
 check "a longer word is not the opener"       ""     "bin/mkx pr open" "$URL" "$O"
 check "a longer last word is not the opener"  ""     "bin/mk pr openx" "$URL" "$O"
+check "a last word with a suffix is not it"   ""     "bin/mk pr open.sh" "$URL" "$O"
+check "a last word with a path is not it"     ""     "bin/mk pr open/x" "$URL" "$O"
 check "a word ending in the opener is not it"  ""     "bin/xmk pr open" "$URL" "$O"
 check "undeclared, the wrapper is ignored"    ""     "bin/mk pr open" "$URL"
 check "a regex character in an opener is literal" "" "bin/mkk pr open" "$URL" "BABYSIT_PR_OPENERS=m.k pr open"
