@@ -184,9 +184,18 @@ def alerts:
 # github-advanced-security app, once it has processed that head's analysis;
 # until then a push has no such check, and the open alerts still describe the
 # previous one, where a just-fixed alert looks unfixed.
+#
+# Only two conclusions mean the head's analysis was compared with the base:
+# SUCCESS (nothing new above the threshold) and FAILURE (new alerts at or
+# above it, the very case the alerts are read for). NEUTRAL means code
+# scanning could not tell what the PR introduced ("1 configuration not found",
+# seen on kaikhq/manekineko PR 17549); cancelled, skipped or stale mean no
+# analysis. Every code-scanning check on the head (one per tool) must be one
+# of the two.
 def code_scanned:
-  any(nodes($checks; .data.repository.object.statusCheckRollup.contexts)[];
-      .__typename == "CheckRun" and .checkSuite.app.slug? == "github-advanced-security");
+  [nodes($checks; .data.repository.object.statusCheckRollup.contexts)[]
+   | select(.__typename == "CheckRun" and .checkSuite.app.slug? == "github-advanced-security")]
+  | length > 0 and all(.status == "COMPLETED" and ((.conclusion // "") | IN("SUCCESS", "FAILURE")));
 
 if refusal then {refused: refusal, url: pr.url?}
 else

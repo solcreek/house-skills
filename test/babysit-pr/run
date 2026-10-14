@@ -260,6 +260,18 @@ check "right after a push, before any check exists, an alert is listed but not w
 check "while a check runs, an alert is listed but not work" \
   ".alerts = [$(alert 12)] | .checks = [$SCANNED, $(run_check 'Analyze (javascript)' IN_PROGRESS null x)]" \
   '(.alerts | length) == 1 and (.alerts_current | not) and .work == 0'
+check "a check that could not compare with the base (neutral) is not current" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED | .conclusion = \"NEUTRAL\"]" \
+  '(.alerts_current | not) and .work == 0'
+check "a cancelled code-scanning check is not current: only the check is work" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED | .conclusion = \"CANCELLED\"]" \
+  '(.alerts_current | not) and .work == 1 and (.checks.failing | length) == 1'
+check "a failed code-scanning check (new alerts) is current" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED | .conclusion = \"FAILURE\"]" \
+  '.alerts_current and (.alerts | length) == 1'
+check "one tool scanned and another neutral is not current" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED, ($SCANNED | .name = \"Semgrep\" | .conclusion = \"NEUTRAL\")]" \
+  '(.alerts_current | not) and .work == 0'
 check "a check named CodeQL from another app is not code scanning's" \
   ".alerts = [$(alert 12)] | .checks = [$(run_check CodeQL COMPLETED '"SUCCESS"' x)]" \
   '(.alerts_current | not) and .work == 0'
