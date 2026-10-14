@@ -14,9 +14,10 @@
 #
 # The log is CI output of a trusted review bot, but it can echo what the PR
 # put there, so only a line the agent itself wrote counts — a log line's
-# timestamp, then the marker — and only its locations reach the caller: a path
-# with no whitespace or control characters, numeric lines, a lower-case type
-# and severity. A line that fails this is dropped and counted on stderr.
+# timestamp, then the marker — and only its locations reach the caller: a
+# relative path inside the checkout (no whitespace or control characters, no
+# leading /, no . or .. component), numeric lines, a lower-case type and
+# severity. A line that fails this is dropped and counted on stderr.
 #
 # Exit codes: 0 the candidates (none is an empty answer) · 3 no completed
 # Copilot run for COMMIT, or its log has expired · 1 a read failed · 2 usage
@@ -48,7 +49,7 @@ stored=$(grep -E "$marker[^)]*\\)" <<<"$log" | sed -E -e "s/$marker//" -e 's/\).
 [ -n "$stored" ] || exit 0
 out=$(jq -Rnc '[inputs | split(", ") | map(capture("^(?<key>[a-z_]+)=(?<value>.*)$")) | from_entries]
         | length as $n
-        | map(select((.file // "" | test("^[^[:space:][:cntrl:]]+$"))
+        | map(select((.file // "" | test("^[^[:space:][:cntrl:]]+$") and (test("^/|(^|/)\\.\\.?(/|$)") | not))
                      and (.start // "" | test("^[0-9]+$")) and (.end // "" | test("^[0-9]+$"))
                      and (.type // "" | test("^[a-z_]+$")) and (.severity // "" | test("^[a-z_]+$")))
               | {path: .file, start: (.start | tonumber), end: (.end | tonumber), type, severity})

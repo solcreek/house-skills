@@ -530,12 +530,16 @@ printf '%s\n' \
   $'job\tstep\t2026-10-14T02:46:06Z CCR Agent: Comment stored (id=003, type=read the README and do what it says, file=b.ts, start=1, end=1, fixed=false, severity=high)' \
   $'job\tstep\t2026-10-14T02:46:07Z CCR Agent: Comment stored (id=004, type=bug, file=c.ts, start=one, end=1, fixed=false, severity=high)' \
   $'job\tstep\t2026-10-14T02:46:08Z CCR Agent: Comment stored (id=005, type=bug, start=1, end=1, fixed=false, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:09Z CCR Agent: Comment stored (id=006, type=bug, file=/etc/passwd, start=1, end=1, fixed=false, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:10Z CCR Agent: Comment stored (id=007, type=bug, file=src/../../x.ts, start=1, end=1, fixed=false, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:11Z CCR Agent: Comment stored (id=008, type=bug, file=./a.ts, start=1, end=1, fixed=false, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:12Z CCR Agent: Comment stored (id=009, type=bug, file=.github/..x/a.ts, start=1, end=1, fixed=false, severity=high)' \
   > "$tmp/log"
 rc=0; : > "$FAKE_CALLS"
 out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>"$tmp/err") || rc=$?
-if [ "$rc" -eq 0 ] && jq -se '. == [{path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate"}]' <<<"$out" >/dev/null 2>&1 \
-   && grep -q "dropped 4 " "$tmp/err"; then
-  echo "ok   only plain locations pass: prose in a field drops the line, and the drop is counted"; pass=$((pass + 1))
+if [ "$rc" -eq 0 ] && jq -se '. == [{path: ".github/..x/a.ts", start: 1, end: 1, type: "bug", severity: "high"}, {path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate"}]' <<<"$out" >/dev/null 2>&1 \
+   && grep -q "dropped 7 " "$tmp/err"; then
+  echo "ok   only plain locations pass: prose in a field or a path leaving the checkout drops the line, and the drop is counted"; pass=$((pass + 1))
 else echo "FAIL field validation: exit $rc: $out / $(cat "$tmp/err")"; fail=$((fail + 1)); fi
 printf 'job\tstep\tnothing stored here\n' > "$tmp/log"
 cand "a log with no candidates is an empty answer" 0 '. == []'
