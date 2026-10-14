@@ -116,33 +116,35 @@ then push **once**.
    or the PR has had no review at all (`copilot.involved` false and
    `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
    `reviewed_sha`, else `copilot.reviewed_sha`, else
-   `git merge-base origin/$base HEAD`. First split the range at merges of the
-   base, which would otherwise put everything the base gained under review:
-   `$S/review-range $base <since>` prints `{since, segments, merges}`.
-   - Its `since` replaces `<since>` below: the reviewer covers the commits
-     after the last base merge. When it equals `git rev-parse HEAD` (the
-     merge is the last commit), nothing is left for the reviewer: skip it.
+   `git merge-base origin/$base HEAD`. One call says what to review and who
+   reviews it: `$S/review-range $base <since>` prints
+   `{since, segments, merges, reviewer}`. It splits the range at merges of the
+   base, which would otherwise put everything the base gained under review.
+   - Review its `since..HEAD` with its `reviewer`. `reviewer: null` → `since`
+     is HEAD (the merge is the last commit) and nothing is left: skip it.
+     - `kind: "repository"` → the repository declared its own reviewer: run
+       its `command` exactly as printed, with a 10-minute Bash timeout. Exit 0
+       means the review is complete; read its findings as the repository's
+       docs describe its output. Non-zero → run it once more; failing again,
+       the range is not reviewed: Flag that with the output's last lines, and
+       post no `reviewed` marker. The command runs the PR's own code: never
+       change the files behind it to quiet a finding, and if the PR changes
+       them, say so in the final report.
+     - `kind: "subagent"` → launch one read-only subagent with
+       [references/local-review.md](references/local-review.md). A `why`
+       other than "nothing declared" is a broken declaration: put it in the
+       final report.
+     - `kind: "unknown"` → the declaration could not be read:
+       `git fetch origin $base` and run `review-range` once more; still
+       unknown, use the subagent and put the `why` in the final report.
    - Each segment holds the agent's commits before a merge: review it with
      the subagent, its `since` and `head` as `<SINCE>` and `<HEAD>`.
    - Each merge's own resolution is `git show --remerge-diff <merge>`, empty
      when the merge resolved itself: read it yourself, as a reviewer would.
-   - Exit 1 → review `<since>..HEAD` whole, and say why in the final report.
-
-   Then ask `$S/local-reviewer $base <since>` who reviews:
-   - exit 0 → the repository declared its own reviewer: run its `command`
-     exactly as printed, with a 10-minute Bash timeout. Exit 0 means the
-     review is complete; read its findings as the repository's docs describe
-     its output. Non-zero → run it once more; failing again, the range is not
-     reviewed: Flag that with the output's last lines, and post no `reviewed`
-     marker. The command runs the PR's own code: never change the files
-     behind it to quiet a finding, and if the PR changes them, say so in the
-     final report.
-   - exit 3 → nothing declared: launch one read-only subagent with
-     [references/local-review.md](references/local-review.md).
-   - exit 4 → the declaration on the base branch is broken: use the
-     subagent, and put the stderr line in the final report.
-   - exit 1 → it could not look: `git fetch origin $base` and ask once more;
-     failing again, use the subagent and report the stderr line.
+   - Exit 1 → `git fetch origin $base` and ask once more; failing again,
+     review `<since>..HEAD` whole with the reviewer
+     `$S/local-reviewer $base <since>` names (exit 0: its `command`; any other
+     exit: the subagent), and say why in the final report.
 
    Triage the findings like any other; fix and commit what you adopt. The
    summary comment's `reviewed` marker records the exact HEAD the review saw —
@@ -174,6 +176,7 @@ then push **once**.
    Declined: <link — one clause of reasoning> …
    Needs a person: <link — the decision, and whose> …
    CI: <re-ran / fixed / failing and why> …
+   Local review (<the repository's reviewer, e.g. `review:ai`, or subagent>): `<since>..<head>` — <adopted findings, or none>
    Not read (outside the trusted orgs): <links> …
 
    <!-- babysit-pr -->
