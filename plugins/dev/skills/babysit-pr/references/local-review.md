@@ -2,7 +2,9 @@
 
 When the repository declares no reviewer of its own (`local-reviewer` exits
 3), step 5 launches one `general-purpose` subagent with this prompt,
-placeholders filled in. It reviews only commits no reviewer has seen, before they are
+placeholders filled in. `<HEAD>` is the checkout's HEAD, or a segment's
+`head` from `review-range` when the subagent reviews commits before a merge of
+the base. It reviews only commits no reviewer has seen, before they are
 pushed, so a finding costs a commit instead of another CI run and another
 Copilot round.
 
