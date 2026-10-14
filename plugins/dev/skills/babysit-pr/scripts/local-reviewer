@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# local-reviewer BASE SINCE
+#
+# The reviewer a repository declares for step 5, in place of the subagent. A
+# repository declares one in REVIEW.md, AGENTS.md or CLAUDE.md (the first of
+# those that has one) with a fenced block:
+#
+#   ```babysit-pr-reviewer
+#   pnpm -s review:ai --base {since} --format text
+#   ```
+#
+# One command line; {since} is replaced with SINCE, the first commit the review
+# must not cover. The command exits 0 when the review ran to completion,
+# whatever it found, and non-zero when it did not.
+#
+# The declaration is read from origin/BASE, never from the checkout: the pull
+# request under review must not be able to choose its own reviewer.
+#
+# Prints one JSON line. Exit codes:
+#   0  {"command": "...", "source": "AGENTS.md"} — run this command
+#   3  {"declared": false} — nothing declared; use the subagent
+#   1  could not tell: origin/BASE missing, or a declaration that is not one
+#      command line containing {since} (message on stderr)
+#   2  usage
+set -euo pipefail
+
+usage="usage: local-reviewer BASE SINCE"
+base=${1:?$usage}
+since=${2:?$usage}
+[[ "$since" =~ ^[0-9a-f]{7,40}$ ]] || { echo "local-reviewer: SINCE must be a commit sha" >&2; exit 2; }
+command -v jq >/dev/null || { echo "local-reviewer needs jq" >&2; exit 1; }
+
+ref="refs/remotes/origin/$base"
+git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
+  || { echo "local-reviewer: origin/$base not found; fetch it first" >&2; exit 1; }
+
+for file in REVIEW.md AGENTS.md CLAUDE.md; do
+  text=$(git show "$ref:$file" 2>/dev/null) || continue
+  blocks=$(awk '/^```babysit-pr-reviewer[[:space:]]*$/ { n++ } END { print n + 0 }' <<<"$text")
+  [ "$blocks" -eq 0 ] && continue
+  if [ "$blocks" -gt 1 ]; then
+    echo "local-reviewer: $file on origin/$base declares $blocks reviewers; it must declare one" >&2
+    exit 1
+  fi
+  lines=$(awk '
+    /^```babysit-pr-reviewer[[:space:]]*$/ { inside = 1; next }
+    inside && /^```/ { exit }
+    inside && NF { print }' <<<"$text")
+  if [ -z "$lines" ] || [ "$(wc -l <<<"$lines")" -ne 1 ]; then
+    echo "local-reviewer: the reviewer block in $file on origin/$base must hold exactly one command line" >&2
+    exit 1
+  fi
+  if [[ "$lines" != *"{since}"* ]]; then
+    echo "local-reviewer: the reviewer in $file on origin/$base must take {since}, or it reviews more than the new commits" >&2
+    exit 1
+  fi
+  jq -nc --arg c "${lines//\{since\}/$since}" --arg s "$file" '{command: $c, source: $s}'
+  exit 0
+done
+
+echo '{"declared": false}'
+exit 3

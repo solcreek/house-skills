@@ -60,6 +60,22 @@ pushes fixes. Copilot reviews are billed per review, so set
 `"BABYSIT_COPILOT": "never"` to stop the skill from asking at all; rulesets
 still trigger their own reviews.
 
+**Your own reviewer.** Before each push the skill reviews its own new
+commits, with a subagent by default. A repository that has its own review
+command declares it in `REVIEW.md`, `AGENTS.md` or `CLAUDE.md` (the first of
+those with one):
+
+````markdown
+```babysit-pr-reviewer
+pnpm -s review:ai --base {since} --format text
+```
+````
+
+One command line; `{since}` becomes the first commit the review must not
+cover. It exits 0 when the review ran to completion, whatever it found. The
+declaration is read from the base branch, so a PR cannot change its own
+reviewer.
+
 **Code scanning.** The skill reads the PR's open code-scanning alerts, not
 only the ones the code-scanning bot comments on, and treats them as feedback
 once the analysis has finished. It never dismisses an alert.

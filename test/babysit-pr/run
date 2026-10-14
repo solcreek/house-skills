@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Tests for babysit-pr's state.jq: trust, convergence, the check rollup and
-# code-scanning alerts.
+# Tests for babysit-pr's state.jq (trust, convergence, the check rollup and
+# code-scanning alerts) and its local-reviewer script.
 # Each case edits one base "world" (a PR plus its feedback), feeds it to
 # state.jq in the same page shapes pr-state fetches, and asserts on the output.
-# No network, no gh.
+# No network, no gh; local-reviewer runs against a scratch repository.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -271,6 +271,75 @@ check "an alert the code-scanning bot opened a thread for is left to the thread"
 check "a link to an alert in someone else's thread does not hide it" \
   ".alerts = [$(alert 12)] | .threads = [$(thread t1 false "$(comment k1 "$ALICE" MEMBER 'see https://github.com/solcreek/x/security/code-scanning/12')")]" \
   '(.alerts | length) == 1'
+
+echo "== local-reviewer"
+lr="$root/plugins/dev/skills/babysit-pr/scripts/local-reviewer"
+# The scratch repository must not inherit a hook's git environment, which
+# would point every call below at the real repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+repo="$tmp/repo"
+git init -q -b main "$repo"
+gitr() { git -C "$repo" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+FENCE='```'
+on_base() { # on_base FILE TEXT — commits FILE and makes that commit origin/main
+  printf '%s\n' "$2" > "$repo/$1"
+  gitr add -A && gitr commit -qm "$1" && gitr update-ref refs/remotes/origin/main HEAD
+}
+reviewer() { # reviewer NAME EXIT ASSERTION — runs local-reviewer main $OLD in the repo
+  local out rc=0
+  out=$(cd "$repo" && "$lr" main "$OLD" 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && jq -e "$3" <<<"$out" >/dev/null 2>&1; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $2: $out"; fail=$((fail + 1))
+  fi
+}
+reviewer_fails() { # reviewer_fails NAME PATTERN — exit 1, PATTERN in the message
+  local out rc=0
+  out=$(cd "$repo" && "$lr" main "$OLD" 2>&1) || rc=$?
+  if [ "$rc" -eq 1 ] && grep -q "$2" <<<"$out"; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc: $out"; fail=$((fail + 1))
+  fi
+}
+reviewer_fails "no origin/BASE is a failure, not 'nothing declared'" "not found"
+on_base README.md "# x"
+reviewer "nothing declared" 3 '.declared == false'
+on_base AGENTS.md "# Agents
+
+$FENCE""babysit-pr-reviewer
+pnpm -s review:ai --base {since} --format text
+$FENCE"
+reviewer "a declaration in AGENTS.md is used, {since} filled in" 0 \
+  '.command == "pnpm -s review:ai --base '"$OLD"' --format text" and .source == "AGENTS.md"'
+printf '%s\n' "$FENCE""babysit-pr-reviewer" "make evil-review {since}" "$FENCE" > "$repo/AGENTS.md"
+gitr commit -qam "the PR changes its reviewer"
+reviewer "the checkout cannot change the reviewer: origin/BASE decides" 0 '.command | startswith("pnpm -s review:ai")'
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review {since}
+$FENCE"
+reviewer "REVIEW.md wins over AGENTS.md" 0 '.command == "bin/review '"$OLD"'" and .source == "REVIEW.md"'
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review --all
+$FENCE"
+reviewer_fails "a reviewer without {since} is refused" "must take {since}"
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review {since}
+bin/other {since}
+$FENCE"
+reviewer_fails "two command lines are refused" "exactly one command line"
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review {since}
+$FENCE
+
+$FENCE""babysit-pr-reviewer
+bin/other {since}
+$FENCE"
+reviewer_fails "two declarations are refused" "declares 2 reviewers"
+rc=0; out=$(cd "$repo" && "$lr" main 'HEAD;rm' 2>&1) || rc=$?
+if [ "$rc" -eq 2 ]; then echo "ok   SINCE must be a sha"; pass=$((pass + 1))
+else echo "FAIL SINCE must be a sha: exit $rc: $out"; fail=$((fail + 1)); fi
 
 echo "== request-copilot"
 rc=0; out=$(BABYSIT_COPILOT=never "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?

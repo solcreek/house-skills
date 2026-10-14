@@ -69,8 +69,10 @@ findings are evidence about the approach, not a queue.
 - **CI failures** — caused by the diff → Fixed. Flaky or infrastructure → one
   re-run, then Flagged. A failure the base branch also has → Flagged ("fails on
   base too"), not fixed here.
-- **Local review** — the subagent's evidence is a head start, not a verdict.
-  A malformed finding line is Flagged with the line quoted, never dropped.
+- **Local review** — the reviewer's evidence is a head start, not a verdict.
+  A malformed finding line from the subagent is Flagged with the line quoted,
+  never dropped. A repository's own reviewer may score or rank its findings;
+  follow the threshold its docs set.
 - **Code-scanning alerts** — `alerts` lists the open alerts the
   code-scanning bot did not comment on; the ones it did are threads. Fixed:
   the alert closes itself once the next analysis no longer reports it, and if
