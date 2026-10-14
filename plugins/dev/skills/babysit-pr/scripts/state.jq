@@ -2,7 +2,9 @@
 # skill reads. Everything that decides whose text reaches the agent lives here.
 #
 # Inputs (--slurpfile): $head, $reviews, $comments, $threads, $timeline, $checks, $runs,
-#                       $rules (the base branch's rules, or null when unreadable)
+#                       $rules (the base branch's rules, or null when unreadable),
+#                       $alerts (pages of the PR's open code-scanning alerts, or
+#                       null when they could not be read)
 # Inputs (--arg):       $orgs, $bots — comma-separated, from the environment only
 # Inputs (--argjson):   $now — epoch seconds
 #
@@ -152,6 +154,49 @@ def bodies($kind; f):
   | map(select(.id as $id | $done | index($id) | not))
   | {todo: map(select(inside)), withheld: map(select(outside_person) | link($kind)), ignored: map(select(is_bot and (inside_bot | not))) | length};
 
+# Open code-scanning alerts on the PR. The alerts API is read because the
+# github-advanced-security bot comments on only some of them; an alert it did
+# comment on is left to that thread, which carries its outcome. Fixed alerts
+# close themselves once an analysis stops reporting them, so only declined and
+# flagged ones need a handled marker. null means the alerts could not be read
+# (no code scanning on the repo, or a token without access), which is not
+# "no alerts".
+def alerts:
+  if $alerts[0] == null then null
+  else handled as $done
+  | [nodes($threads; .data.repository.pullRequest.reviewThreads)[]
+     | .comments.nodes[0] | select(. != null and login == "github-advanced-security")
+     | .body | scan("/security/code-scanning/([0-9]+)") | .[0] | tonumber] as $threaded
+  | [$alerts[0][][]? | select(.state == "open")]
+  | map(select(.number as $n | $threaded | index($n) | not))
+  | map({id: "code-scanning:\(.number)", number, url: .html_url,
+         rule: .rule.id, severity: (.rule.security_severity_level // .rule.severity),
+         tool: .tool.name,
+         path: .most_recent_instance.location.path, line: .most_recent_instance.location.start_line,
+         message: (.most_recent_instance.message.text // "" | clean)})
+  | map(select(.id as $id | $done | index($id) | not))
+  | sort_by(.number)
+  end;
+
+# Whether code scanning has analysed the head. An alert's commit cannot tell:
+# a PR is analysed on its merge ref, so that commit is the merge commit, never
+# the head. Code scanning also posts a check on the head itself, from the
+# github-advanced-security app, once it has processed that head's analysis;
+# until then a push has no such check, and the open alerts still describe the
+# previous one, where a just-fixed alert looks unfixed.
+#
+# Only two conclusions mean the head's analysis was compared with the base:
+# SUCCESS (nothing new above the threshold) and FAILURE (new alerts at or
+# above it, the very case the alerts are read for). NEUTRAL means code
+# scanning could not tell what the PR introduced ("1 configuration not found",
+# seen on kaikhq/manekineko PR 17549); cancelled, skipped or stale mean no
+# analysis. Every code-scanning check on the head (one per tool) must be one
+# of the two.
+def code_scanned:
+  [nodes($checks; .data.repository.object.statusCheckRollup.contexts)[]
+   | select(.__typename == "CheckRun" and .checkSuite.app.slug? == "github-advanced-security")]
+  | length > 0 and all(.status == "COMPLETED" and ((.conclusion // "") | IN("SUCCESS", "FAILURE")));
+
 if refusal then {refused: refusal, url: pr.url?}
 else
   threads as $th
@@ -159,6 +204,7 @@ else
   | bodies("comment"; nodes($comments; .data.repository.pullRequest.comments)) as $cm
   | checks as $ck
   | copilot_state as $cp
+  | alerts as $al
   | {pr: pr.number, url: pr.url, state: pr.state, draft: pr.isDraft,
      head: pr.headRefOid, branch: pr.headRefName, base: pr.baseRefName,
      mergeable: pr.mergeable, merge_state: pr.mergeStateStatus,
@@ -169,11 +215,16 @@ else
      threads: $th.todo,
      reviews: ($rv.todo | map(item + {state, commit: .commit.oid})),
      comments: ($cm.todo | map(item)),
+     alerts: $al,
      awaiting: $th.awaiting,
      withheld: ($th.withheld + $rv.withheld + $cm.withheld),
      ignored_bot_items: ($rv.ignored + $cm.ignored)}
   | .settled = ((.checks.pending | length) == 0 and .copilot.pending == 0 and .mergeable != "UNKNOWN")
+  # The open alerts describe the head only once code scanning has analysed it
+  # and no check is still running; until then they are listed but not work.
+  | .alerts_current = (.alerts != null and (.checks.pending | length) == 0 and code_scanned)
   | .work = ((.threads | length) + (.reviews | length) + (.comments | length) + (.checks.failing | length)
+             + (if .alerts_current then (.alerts | length) else 0 end)
              + (if .mergeable == "CONFLICTING" or .merge_state == "BEHIND" then 1 else 0 end))
   | .done = (.state == "OPEN" and .settled and .work == 0 and .mergeable == "MERGEABLE")
 end

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# local-reviewer BASE SINCE
+#
+# The reviewer a repository declares for step 5, in place of the subagent. A
+# repository declares one in REVIEW.md, AGENTS.md or CLAUDE.md (the first of
+# those that has one) with a fenced block:
+#
+#   ```babysit-pr-reviewer
+#   pnpm -s review:ai --base {since} --format text
+#   ```
+#
+# One command line; {since} is replaced with SINCE, the first commit the review
+# must not cover. The command exits 0 when the review ran to completion,
+# whatever it found, and non-zero when it did not.
+#
+# The declaration is read from origin/BASE, never from the checkout, so the
+# pull request under review cannot change which command runs. It does not pin
+# what the command does: the command runs in the checkout, so scripts it calls
+# (a package.json script, a bin/ file) are the PR's own, like the build and
+# tests the skill already runs. This guards against a PR swapping or dropping
+# its reviewer, not against a PR that rewrites the review tool.
+#
+# Prints one JSON line. Exit codes:
+#   0  {"command": "...", "source": "AGENTS.md"} — run this command
+#   3  {"declared": false} — nothing declared; use the subagent
+#   4  a broken declaration: not exactly one command line, or one without
+#      {since} (message on stderr)
+#   1  could not look: origin/BASE missing, a file on it unreadable, or jq
+#      missing (message on stderr)
+#   2  usage
+set -euo pipefail
+
+usage="usage: local-reviewer BASE SINCE"
+base=${1:?$usage}
+since=${2:?$usage}
+[[ "$since" =~ ^[0-9a-f]{7,40}$ ]] || { echo "local-reviewer: SINCE must be a commit sha" >&2; exit 2; }
+command -v jq >/dev/null || { echo "local-reviewer needs jq" >&2; exit 1; }
+
+ref="refs/remotes/origin/$base"
+git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
+  || { echo "local-reviewer: origin/$base not found; fetch it first" >&2; exit 1; }
+
+# Lists the reviewer blocks in a Markdown file on stdin: "O" once per block,
+# then "L<TAB>line" for each non-blank line of the first. Only a top-level fence
+# counts, so an example nested in a longer fence (documentation of this very
+# format) is not a declaration. CommonMark rules: a fence is 3+ backticks or
+# tildes indented at most 3 spaces, closed by a run of the same character at
+# least as long with nothing after it; an unclosed fence runs to the end.
+declarations() {
+  awk '
+    function run(s, c,   n) { n = 0; while (substr(s, n + 1, 1) == c) n++; return n }
+    { sub(/\r$/, ""); line = $0; sub(/^ ? ? ?/, "", line) }
+    !open {
+      c = substr(line, 1, 1)
+      if ((c != "`" && c != "~") || run(line, c) < 3) next
+      n = run(line, c); info = substr(line, n + 1)
+      if (c == "`" && index(info, "`")) next
+      gsub(/^[ \t]+|[ \t]+$/, "", info)
+      open = 1; fc = c; fl = n
+      decl = (info == "babysit-pr-reviewer")
+      if (decl) blocks++
+      next
+    }
+    substr(line, 1, 1) == fc && run(line, fc) >= fl && substr(line, run(line, fc) + 1) ~ /^[ \t]*$/ { open = 0; next }
+    decl && blocks == 1 && NF { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print "L\t" $0 }
+    END { for (i = 0; i < blocks; i++) print "O" }'
+}
+
+for file in REVIEW.md AGENTS.md CLAUDE.md; do
+  # Absent is "nothing here"; present but unreadable (a partial clone missing
+  # the blob) is "could not look", never "nothing declared".
+  listed=$(git ls-tree --name-only "$ref" -- "$file") \
+    || { echo "local-reviewer: could not list origin/$base" >&2; exit 1; }
+  [ -n "$listed" ] || continue
+  text=$(git show "$ref:$file") \
+    || { echo "local-reviewer: could not read $file on origin/$base" >&2; exit 1; }
+  found=$(declarations <<<"$text")
+  blocks=$(grep -c '^O$' <<<"$found" || true)
+  [ "$blocks" -eq 0 ] && continue
+  if [ "$blocks" -gt 1 ]; then
+    echo "local-reviewer: $file on origin/$base declares $blocks reviewers; it must declare one" >&2
+    exit 4
+  fi
+  lines=$(sed -n 's/^L.//p' <<<"$found")
+  if [ -z "$lines" ] || [ "$(wc -l <<<"$lines")" -ne 1 ]; then
+    echo "local-reviewer: the reviewer block in $file on origin/$base must hold exactly one command line" >&2
+    exit 4
+  fi
+  if [[ "$lines" != *"{since}"* ]]; then
+    echo "local-reviewer: the reviewer in $file on origin/$base must take {since}, or it reviews more than the new commits" >&2
+    exit 4
+  fi
+  jq -nc --arg c "${lines//\{since\}/$since}" --arg s "$file" '{command: $c, source: $s}'
+  exit 0
+done
+
+echo '{"declared": false}'
+exit 3

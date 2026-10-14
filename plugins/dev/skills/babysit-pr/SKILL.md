@@ -90,25 +90,45 @@ then push **once**.
      the diff cannot reach) → `gh run rerun <run_id> --failed`, **once per
      check per head**. Failing again → a person's call.
    - No `run_id` (an external status) → a person's call; give its `url`.
-3. **Feedback**: `threads`, `reviews` and `comments`. Triage every item per
-   [references/triage.md](references/triage.md) into **Fixed**, **Declined** or
-   **Flagged**, subject to [references/safety.md](references/safety.md).
+3. **Feedback**: `threads`, `reviews`, `comments` and `alerts`. Triage every
+   item per [references/triage.md](references/triage.md) into **Fixed**,
+   **Declined** or **Flagged**, subject to [references/safety.md](references/safety.md).
    Read a Copilot review body in full: findings under "Previously missed"
    exist nowhere else, and its summary sentence ("no new comments") is not a
-   verdict.
+   verdict. `alerts` are the PR's open code-scanning alerts; triage them only
+   when `alerts_current` is true (code scanning has analysed this head and no
+   check is running). Until then they may describe the previous push, where a
+   fix you just made still looks unfixed. `alerts: null` means they could not
+   be read (no code scanning, or no access); alerts never current on the
+   final head were not checked against it. Say either in the final report.
 4. **Commit** each fix on its own (one finding, one commit, tests with it),
    in the repo's commit style, after running the narrowest relevant tests.
    A fix that breaks tests gets reverted, and the item becomes Flagged.
 5. **Review your own commits before pushing.** If this cycle made commits —
    or the PR has had no review at all (`copilot.involved` false and
-   `reviewed_sha` null) — launch one read-only subagent with
-   [references/local-review.md](references/local-review.md) over
-   `<since>..HEAD`, where `<since>` is `reviewed_sha`, else
-   `copilot.reviewed_sha`, else `git merge-base origin/$base HEAD`. Triage its
-   findings like any other; fix and commit what you adopt. The summary
-   comment's `reviewed` marker records the exact HEAD the subagent saw — never
-   a later one. Commits made after it (fixes for its findings) are reviewed in
-   the next cycle, or before finishing (see "Settled and clean").
+   `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
+   `reviewed_sha`, else `copilot.reviewed_sha`, else
+   `git merge-base origin/$base HEAD`. Ask `$S/local-reviewer $base <since>`
+   who reviews:
+   - exit 0 → the repository declared its own reviewer: run its `command`
+     exactly as printed, with a 10-minute Bash timeout. Exit 0 means the
+     review is complete; read its findings as the repository's docs describe
+     its output. Non-zero → run it once more; failing again, the range is not
+     reviewed: Flag that with the output's last lines, and post no `reviewed`
+     marker. The command runs the PR's own code: never change the files
+     behind it to quiet a finding, and if the PR changes them, say so in the
+     final report.
+   - exit 3 → nothing declared: launch one read-only subagent with
+     [references/local-review.md](references/local-review.md).
+   - exit 4 → the declaration on the base branch is broken: use the
+     subagent, and put the stderr line in the final report.
+   - exit 1 → it could not look: `git fetch origin $base` and ask once more;
+     failing again, use the subagent and report the stderr line.
+
+   Triage the findings like any other; fix and commit what you adopt. The
+   summary comment's `reviewed` marker records the exact HEAD the review saw —
+   never a later one. Commits made after it (fixes for its findings) are
+   reviewed in the next cycle, or before finishing (see "Settled and clean").
 6. **Push**: `git push`. Never `--force`, never to the base branch.
 7. **Answer.**
    - Thread, Fixed → `$S/thread reply <id>` with `Fixed in <sha> — <what changed>`.
@@ -118,8 +138,9 @@ then push **once**.
      `$S/thread resolve <id>`.
    - Thread, Flagged → reply `Flagged for human review — <the decision needed>`;
      leave it open.
-   - Review bodies and PR comments have no thread: answer them in the summary
-     comment and list their ids in its `handled` marker.
+   - Review bodies, PR comments and alerts have no thread: answer them in the
+     summary comment and list their ids in its `handled` marker. A Fixed
+     alert needs no marker: it closes once an analysis stops reporting it.
    Pipe replies on stdin, and end every reply with the tag line
    `<!-- babysit-pr -->`: `printf '%s\n\n<!-- babysit-pr -->' "$body" | $S/thread reply <id>`.
    The tag is how `pr-state` tells your replies from the person running the
@@ -190,8 +211,10 @@ Output only:
 
 - Status: `done`, `needs a person`, or `stopped: <reason>`
 - Cycles, runtime, Copilot requests (and whether the repo reviews
-  automatically), local reviews
+  automatically), local reviews and who ran them (the repository's reviewer
+  or the subagent)
 - Fixed / declined / flagged counts by source (threads, review bodies,
-  comments, CI, local review); commits as `<sha> <subject>`
+  comments, code-scanning alerts, CI, local review); commits as
+  `<sha> <subject>`
 - Open items with links and who must decide; withheld links
 - PR state, head sha, check summary

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Tests for babysit-pr's state.jq: trust, convergence and the check rollup.
+# Tests for babysit-pr's state.jq (trust, convergence, the check rollup and
+# code-scanning alerts) and its local-reviewer script.
 # Each case edits one base "world" (a PR plus its feedback), feeds it to
 # state.jq in the same page shapes pr-state fetches, and asserts on the output.
-# No network, no gh.
+# No network, no gh; local-reviewer runs against a scratch repository.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,7 +25,7 @@ base=$(jq -nc --arg head "$HEAD" '{
        mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
        author: {__typename: "User", login: "me"}, authorAssociation: "MEMBER",
        labels: {nodes: []}, reviewRequests: {nodes: []}},
-  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [], rules: [],
+  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [], rules: [], alerts: [],
   now: 1791288000}')
 
 user() { echo "{\"__typename\": \"User\", \"login\": \"$1\"}"; }
@@ -43,8 +44,9 @@ run() {
          else [{data: {repository: {object: {statusCheckRollup: {contexts: {nodes: .checks}}}}}}] end' <<<"$w" > "$tmp/checks"
   jq -c '.runs' <<<"$w" > "$tmp/runs"
   jq -c '.rules' <<<"$w" > "$tmp/rules"
+  jq -c 'if .alerts == null then null else [.alerts] end' <<<"$w" > "$tmp/alerts"
   jq -n -c -f "$jqfile" \
-    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" --slurpfile rules "$tmp/rules" \
+    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" --slurpfile rules "$tmp/rules" --slurpfile alerts "$tmp/alerts" \
     --arg orgs "$(jq -r .orgs <<<"$w")" --arg bots "$(jq -r .bots <<<"$w")" \
     --slurpfile head "$tmp/head" --slurpfile reviews "$tmp/reviews" --slurpfile comments "$tmp/comments" \
     --slurpfile threads "$tmp/threads" --slurpfile timeline "$tmp/timeline" --slurpfile checks "$tmp/checks"
@@ -87,8 +89,14 @@ run_check() { # run_check NAME STATUS CONCLUSION STARTED [EVENT]
   echo "{\"__typename\": \"CheckRun\", \"name\": \"$1\", \"status\": \"$2\", \"conclusion\": $3, \"startedAt\": \"$4\", \"detailsUrl\": \"d\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}, \"workflowRun\": {\"databaseId\": 9, \"event\": \"${5:-pull_request}\", \"workflow\": {\"name\": \"CI\"}}}}"
 }
 
+alert() { # alert NUMBER [STATE] — a CodeQL alert as the alerts API returns it
+  echo "{\"number\": $1, \"state\": \"${2:-open}\", \"html_url\": \"https://github.com/solcreek/x/security/code-scanning/$1\", \"rule\": {\"id\": \"js/xss\", \"severity\": \"error\", \"security_severity_level\": \"high\"}, \"tool\": {\"name\": \"CodeQL\"}, \"most_recent_instance\": {\"commit_sha\": \"$HEAD\", \"location\": {\"path\": \"a.js\", \"start_line\": 4}, \"message\": {\"text\": \"Cross-site scripting\"}}}"
+}
+
+SCANNED='{"__typename": "CheckRun", "name": "CodeQL", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "x", "detailsUrl": "d", "checkSuite": {"app": {"slug": "github-advanced-security"}, "workflowRun": null}}'
+
 ME=$(user me); ALICE=$(user alice); EVE=$(user eve)
-COPILOT=$(bot copilot-pull-request-reviewer); VERCEL=$(bot vercel)
+COPILOT=$(bot copilot-pull-request-reviewer); VERCEL=$(bot vercel); GHAS=$(bot github-advanced-security)
 
 echo "== convergence"
 check "a quiet, green, mergeable PR is done" '.' '.done and .settled and .work == 0'
@@ -241,6 +249,138 @@ check "unreadable rules are not 'no rule': no first request" \
   '.rules = null' '.copilot.auto == null and (.copilot.first_request | not)'
 check "Copilot already asked: no first request" \
   ".timeline = [$(asked 1)]" '.copilot.auto == false and (.copilot.first_request | not)'
+
+echo "== code scanning"
+check "an open alert is work once code scanning has analysed the head" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED]" \
+  '.alerts == [{id: "code-scanning:12", number: 12, url: "https://github.com/solcreek/x/security/code-scanning/12", rule: "js/xss", severity: "high", tool: "CodeQL", path: "a.js", line: 4, message: "Cross-site scripting"}] and .alerts_current and .work == 1 and (.done | not)'
+check "right after a push, before any check exists, an alert is listed but not work" \
+  ".alerts = [$(alert 12)]" \
+  '(.alerts | length) == 1 and (.alerts_current | not) and .work == 0'
+check "while a check runs, an alert is listed but not work" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED, $(run_check 'Analyze (javascript)' IN_PROGRESS null x)]" \
+  '(.alerts | length) == 1 and (.alerts_current | not) and .work == 0'
+check "a check that could not compare with the base (neutral) is not current" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED | .conclusion = \"NEUTRAL\"]" \
+  '(.alerts_current | not) and .work == 0'
+check "a cancelled code-scanning check is not current: only the check is work" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED | .conclusion = \"CANCELLED\"]" \
+  '(.alerts_current | not) and .work == 1 and (.checks.failing | length) == 1'
+check "a failed code-scanning check (new alerts) is current" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED | .conclusion = \"FAILURE\"]" \
+  '.alerts_current and (.alerts | length) == 1'
+check "one tool scanned and another neutral is not current" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED, ($SCANNED | .name = \"Semgrep\" | .conclusion = \"NEUTRAL\")]" \
+  '(.alerts_current | not) and .work == 0'
+check "a check named CodeQL from another app is not code scanning's" \
+  ".alerts = [$(alert 12)] | .checks = [$(run_check CodeQL COMPLETED '"SUCCESS"' x)]" \
+  '(.alerts_current | not) and .work == 0'
+check "a closed alert is nothing" ".alerts = [$(alert 12 fixed)]" '.alerts == [] and .done'
+check "unreadable alerts are null, not none" '.alerts = null' '.alerts == null and .done'
+check "a handled marker of the token's clears a declined alert" \
+  ".alerts = [$(alert 12), $(alert 13)] | .checks = [$SCANNED] | .comments = [$(comment c1 "$ME" MEMBER 'x <!-- babysit-pr --> <!-- babysit-pr:handled code-scanning:12 -->')]" \
+  '.alerts | map(.number) == [13]'
+check "a handled marker from anyone else does not" \
+  ".alerts = [$(alert 12)] | .comments = [$(comment c1 "$ALICE" MEMBER '<!-- babysit-pr:handled code-scanning:12 -->')]" \
+  '(.alerts | length) == 1'
+check "an alert the code-scanning bot opened a thread for is left to the thread" \
+  ".alerts = [$(alert 12), $(alert 13)] | .threads = [$(thread t1 true "$(comment k1 "$GHAS" NONE '## CodeQL / XSS
+
+[Show more details](https://github.com/solcreek/x/security/code-scanning/12)')")]" \
+  '.alerts | map(.number) == [13]'
+check "a link to an alert in someone else's thread does not hide it" \
+  ".alerts = [$(alert 12)] | .threads = [$(thread t1 false "$(comment k1 "$ALICE" MEMBER 'see https://github.com/solcreek/x/security/code-scanning/12')")]" \
+  '(.alerts | length) == 1'
+
+echo "== local-reviewer"
+lr="$root/plugins/dev/skills/babysit-pr/scripts/local-reviewer"
+# The scratch repository must not inherit a hook's git environment, which
+# would point every call below at the real repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+repo="$tmp/repo"
+git init -q -b main "$repo"
+gitr() { git -C "$repo" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+FENCE='```'
+on_base() { # on_base FILE TEXT — commits FILE and makes that commit origin/main
+  printf '%s\n' "$2" > "$repo/$1"
+  gitr add -A && gitr commit -qm "$1" && gitr update-ref refs/remotes/origin/main HEAD
+}
+reviewer() { # reviewer NAME EXIT ASSERTION — runs local-reviewer main $OLD in the repo
+  local out rc=0
+  out=$(cd "$repo" && "$lr" main "$OLD" 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && jq -e "$3" <<<"$out" >/dev/null 2>&1; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $2: $out"; fail=$((fail + 1))
+  fi
+}
+reviewer_fails() { # reviewer_fails NAME EXIT PATTERN — EXIT, PATTERN in the message
+  local out rc=0
+  out=$(cd "$repo" && "$lr" main "$OLD" 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && grep -q "$3" <<<"$out"; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc: $out"; fail=$((fail + 1))
+  fi
+}
+reviewer_fails "no origin/BASE is a failure to look, not 'nothing declared'" 1 "not found"
+on_base README.md "# x"
+reviewer "nothing declared" 3 '.declared == false'
+on_base CLAUDE.md "To declare a reviewer, write:
+
+$FENCE\`markdown
+$FENCE""babysit-pr-reviewer
+pnpm review {since}
+$FENCE
+$FENCE\`"
+reviewer "an example nested in a longer fence is not a declaration" 3 '.declared == false'
+on_base AGENTS.md "# Agents
+
+$FENCE""babysit-pr-reviewer
+pnpm -s review:ai --base {since} --format text
+$FENCE"
+reviewer "a declaration in AGENTS.md is used, {since} filled in" 0 \
+  '.command == "pnpm -s review:ai --base '"$OLD"' --format text" and .source == "AGENTS.md"'
+printf '%s\n' "$FENCE""babysit-pr-reviewer" "make evil-review {since}" "$FENCE" > "$repo/AGENTS.md"
+gitr commit -qam "the PR changes its reviewer"
+reviewer "the checkout cannot change the reviewer command: origin/BASE decides" 0 '.command | startswith("pnpm -s review:ai")'
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review {since}
+$FENCE"
+reviewer "REVIEW.md wins over AGENTS.md" 0 '.command == "bin/review '"$OLD"'" and .source == "REVIEW.md"'
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review --all
+$FENCE"
+reviewer_fails "a reviewer without {since} is refused" 4 "must take {since}"
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review {since}
+bin/other {since}
+$FENCE"
+reviewer_fails "two command lines are refused" 4 "exactly one command line"
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer
+bin/review {since}
+$FENCE
+
+$FENCE""babysit-pr-reviewer
+bin/other {since}
+$FENCE"
+reviewer_fails "two declarations are refused" 4 "declares 2 reviewers"
+on_base REVIEW.md "$FENCE""babysit-pr-reviewer"$'\r'"
+bin/review {since}"$'\r'"
+$FENCE"$'\r'
+reviewer "CRLF line endings stay out of the command" 0 '.command == "bin/review '"$OLD"'"'
+on_base REVIEW.md "~~~ babysit-pr-reviewer
+  bin/review {since}
+~~~"
+reviewer "a tilde fence declares too, and the line is trimmed" 0 '.command == "bin/review '"$OLD"'"'
+# A partial clone without the blob: present on the base, but unreadable.
+blob=$(gitr rev-parse "refs/remotes/origin/main:REVIEW.md")
+mv "$repo/.git/objects/${blob:0:2}/${blob:2}" "$tmp/blob"
+reviewer_fails "a declaration file that cannot be read is a failure to look" 1 "could not read REVIEW.md"
+mv "$tmp/blob" "$repo/.git/objects/${blob:0:2}/${blob:2}"
+rc=0; out=$(cd "$repo" && "$lr" main 'HEAD;rm' 2>&1) || rc=$?
+if [ "$rc" -eq 2 ]; then echo "ok   SINCE must be a sha"; pass=$((pass + 1))
+else echo "FAIL SINCE must be a sha: exit $rc: $out"; fail=$((fail + 1)); fi
 
 echo "== request-copilot"
 rc=0; out=$(BABYSIT_COPILOT=never "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?

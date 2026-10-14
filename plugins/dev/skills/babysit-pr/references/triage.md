@@ -1,7 +1,7 @@
 # Triage — Fixed, Declined or Flagged
 
-Every item — a thread, a review-body finding, a PR comment, a CI failure, a
-local-review finding — gets exactly one outcome. A finding being true does not
+Every item — a thread, a review-body finding, a PR comment, a code-scanning
+alert, a CI failure, a local-review finding — gets exactly one outcome. A finding being true does not
 make it a requirement; deciding that is your job, and you write the reason
 down.
 
@@ -69,8 +69,17 @@ findings are evidence about the approach, not a queue.
 - **CI failures** — caused by the diff → Fixed. Flaky or infrastructure → one
   re-run, then Flagged. A failure the base branch also has → Flagged ("fails on
   base too"), not fixed here.
-- **Local review** — the subagent's evidence is a head start, not a verdict.
-  A malformed finding line is Flagged with the line quoted, never dropped.
+- **Local review** — the reviewer's evidence is a head start, not a verdict.
+  A malformed finding line from the subagent is Flagged with the line quoted,
+  never dropped. A repository's own reviewer may score or rank its findings;
+  follow the threshold its docs set.
+- **Code-scanning alerts** — `alerts` lists the open alerts the
+  code-scanning bot did not comment on; the ones it did are threads. They are
+  work only while `alerts_current` holds. Fixed: the alert closes itself once
+  the next analysis no longer reports it; still open while `alerts_current`
+  holds on a head with the fix, the fix did not take. Declined or Flagged: put
+  its id (`code-scanning:<number>`) in the summary's `handled` marker, and
+  leave the alert open for a person.
 
 ## Code-scanning and security findings
 
