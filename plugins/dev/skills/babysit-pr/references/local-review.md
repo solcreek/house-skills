@@ -1,10 +1,10 @@
 # Local review — the subagent prompt
 
 When `review-range` names no repository reviewer (`reviewer.kind` is
-`subagent`), and for each segment it returns, step 5 launches one `general-purpose` subagent with this prompt,
-placeholders filled in. `<HEAD>` is the checkout's HEAD, or a segment's
-`head` from `review-range` when the subagent reviews commits before a merge of
-the base. It reviews only commits no reviewer has seen, before they are
+`subagent`), and for each segment it returns, step 5 launches one
+`general-purpose` subagent with this prompt, placeholders filled in.
+`<HEAD>` is the checkout's HEAD, or a segment's `head` from `review-range`
+when the subagent reviews commits before a merge of the base. It reviews only commits no reviewer has seen, before they are
 pushed, so a finding costs a commit instead of another CI run and another
 Copilot round.
 
