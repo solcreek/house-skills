@@ -20,16 +20,15 @@ payload() {
 # check NAME EXPECTED-URL-OR-EMPTY COMMAND STDOUT [ENV...]
 # The hook runs on every Bash call, so it must also stay silent on stderr.
 check() {
-  local name=$1 want=$2 out got err code=0
+  local name=$1 want=$2 out got code=0
   out=$(payload "$3" "$4" | env "${@:5}" "$hook" 2>"$errf") || code=$?
-  err=$(cat "$errf")
   got=$(jq -r '.hookSpecificOutput.additionalContext // empty' <<<"${out:-null}" |
     grep -Eo 'https://[^ `]+/pull/[0-9]+' | head -1 || true)
-  if [ "$code" -eq 0 ] && [ "$got" = "$want" ] && [ -z "$err" ]; then
+  if [ "$code" -eq 0 ] && [ "$got" = "$want" ] && [ ! -s "$errf" ]; then
     echo "ok   $name"; pass=$((pass + 1))
   else
     echo "FAIL $name"; echo "     exit $code, want '$want', got '$got'"; echo "     output: $out"
-    [ -z "$err" ] || echo "     stderr: $err"
+    [ ! -s "$errf" ] || echo "     stderr: $(od -c "$errf" | head -3)"
     fail=$((fail + 1))
   fi
 }
