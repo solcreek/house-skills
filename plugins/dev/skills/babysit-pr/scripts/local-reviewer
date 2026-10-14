@@ -34,18 +34,42 @@ ref="refs/remotes/origin/$base"
 git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
   || { echo "local-reviewer: origin/$base not found; fetch it first" >&2; exit 1; }
 
+# Lists the reviewer blocks in a Markdown file on stdin: "O" once per block,
+# then "L<TAB>line" for each non-blank line of the first. Only a top-level fence
+# counts, so an example nested in a longer fence (documentation of this very
+# format) is not a declaration. CommonMark rules: a fence is 3+ backticks or
+# tildes indented at most 3 spaces, closed by a run of the same character at
+# least as long with nothing after it; an unclosed fence runs to the end.
+declarations() {
+  awk '
+    function run(s, c,   n) { n = 0; while (substr(s, n + 1, 1) == c) n++; return n }
+    { sub(/\r$/, ""); line = $0; sub(/^ ? ? ?/, "", line) }
+    !open {
+      c = substr(line, 1, 1)
+      if ((c != "`" && c != "~") || run(line, c) < 3) next
+      n = run(line, c); info = substr(line, n + 1)
+      if (c == "`" && index(info, "`")) next
+      gsub(/^[ \t]+|[ \t]+$/, "", info)
+      open = 1; fc = c; fl = n
+      decl = (info == "babysit-pr-reviewer")
+      if (decl) blocks++
+      next
+    }
+    substr(line, 1, 1) == fc && run(line, fc) >= fl && substr(line, run(line, fc) + 1) ~ /^[ \t]*$/ { open = 0; next }
+    decl && blocks == 1 && NF { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print "L\t" $0 }
+    END { for (i = 0; i < blocks; i++) print "O" }'
+}
+
 for file in REVIEW.md AGENTS.md CLAUDE.md; do
   text=$(git show "$ref:$file" 2>/dev/null) || continue
-  blocks=$(awk '/^```babysit-pr-reviewer[[:space:]]*$/ { n++ } END { print n + 0 }' <<<"$text")
+  found=$(declarations <<<"$text")
+  blocks=$(grep -c '^O$' <<<"$found" || true)
   [ "$blocks" -eq 0 ] && continue
   if [ "$blocks" -gt 1 ]; then
     echo "local-reviewer: $file on origin/$base declares $blocks reviewers; it must declare one" >&2
     exit 1
   fi
-  lines=$(awk '
-    /^```babysit-pr-reviewer[[:space:]]*$/ { inside = 1; next }
-    inside && /^```/ { exit }
-    inside && NF { print }' <<<"$text")
+  lines=$(sed -n 's/^L.//p' <<<"$found")
   if [ -z "$lines" ] || [ "$(wc -l <<<"$lines")" -ne 1 ]; then
     echo "local-reviewer: the reviewer block in $file on origin/$base must hold exactly one command line" >&2
     exit 1
