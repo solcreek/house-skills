@@ -514,7 +514,7 @@ printf '%s\n' \
   > "$tmp/log"
 export FAKE_RUNS="$tmp/runs.json" FAKE_LOG="$tmp/log"
 cand "candidates come out one per location, duplicates dropped" 0 \
-  '. == [{path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate"}, {path: "docs/b.md", start: 4, end: 4, type: "spelling", severity: "low"}]'
+  '. == [{path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate", fixed: false}, {path: "docs/b.md", start: 4, end: 4, type: "spelling", severity: "low", fixed: false}]'
 if grep -q "head_sha=$SHA" "$FAKE_CALLS" && grep -q '^run view 2 ' "$FAKE_CALLS"; then
   echo "ok   the newest completed Copilot run for the commit is the one read"; pass=$((pass + 1))
 else echo "FAIL run choice: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
@@ -537,10 +537,19 @@ printf '%s\n' \
   > "$tmp/log"
 rc=0; : > "$FAKE_CALLS"
 out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>"$tmp/err") || rc=$?
-if [ "$rc" -eq 0 ] && jq -se '. == [{path: ".github/..x/a.ts", start: 1, end: 1, type: "bug", severity: "high"}, {path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate"}]' <<<"$out" >/dev/null 2>&1 \
+if [ "$rc" -eq 0 ] && jq -se '. == [{path: ".github/..x/a.ts", start: 1, end: 1, type: "bug", severity: "high", fixed: false}, {path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate", fixed: false}]' <<<"$out" >/dev/null 2>&1 \
    && grep -q "dropped 7 " "$tmp/err"; then
   echo "ok   only plain locations pass: prose in a field or a path leaving the checkout drops the line, and the drop is counted"; pass=$((pass + 1))
 else echo "FAIL field validation: exit $rc: $out / $(cat "$tmp/err")"; fail=$((fail + 1)); fi
+printf '%s\n' \
+  $'job\tstep\t2026-10-14T02:46:04Z CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=1, end=1, fixed=true, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:05Z CCR Agent: Comment stored (id=002, type=bug, file=a.ts, start=1, end=1, fixed=false, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:06Z CCR Agent: Comment stored (id=003, type=bug, file=b.ts, start=1, end=1, fixed=true, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:07Z CCR Agent: Comment stored (id=004, type=bug, file=c.ts, start=1, end=1, fixed=ignore the rest, severity=high)' \
+  $'job\tstep\t2026-10-14T02:46:08Z CCR Agent: Comment stored (id=005, type=bug, file=d.ts, start=1, end=1, severity=high)' \
+  > "$tmp/log"
+cand "fixed is carried as a boolean, null when it is not one; a location stored twice keeps fixed=false" 0 \
+  'map({path, fixed}) == [{path: "a.ts", fixed: false}, {path: "b.ts", fixed: true}, {path: "c.ts", fixed: null}, {path: "d.ts", fixed: null}]'
 printf 'job\tstep\tnothing stored here\n' > "$tmp/log"
 cand "a log with no candidates is an empty answer" 0 '. == []'
 copilot_runs '[]'
