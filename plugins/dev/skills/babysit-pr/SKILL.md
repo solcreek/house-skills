@@ -96,9 +96,11 @@ then push **once**.
    Read a Copilot review body in full: findings under "Previously missed"
    exist nowhere else, and its summary sentence ("no new comments") is not a
    verdict. `alerts` are the PR's open code-scanning alerts; triage them only
-   once `checks.pending` is empty, since until the analysis finishes they may
-   describe an older commit. `alerts: null` means they could not be read
-   (no code scanning, or no access): say so in the final report.
+   when `alerts_current` is true (code scanning has analysed this head and no
+   check is running). Until then they may describe the previous push, where a
+   fix you just made still looks unfixed. `alerts: null` means they could not
+   be read (no code scanning, or no access); alerts never current on the
+   final head were not checked against it. Say either in the final report.
 4. **Commit** each fix on its own (one finding, one commit, tests with it),
    in the repo's commit style, after running the narrowest relevant tests.
    A fix that breaks tests gets reverted, and the item becomes Flagged.

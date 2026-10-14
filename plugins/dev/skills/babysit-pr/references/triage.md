@@ -74,9 +74,10 @@ findings are evidence about the approach, not a queue.
   never dropped. A repository's own reviewer may score or rank its findings;
   follow the threshold its docs set.
 - **Code-scanning alerts** — `alerts` lists the open alerts the
-  code-scanning bot did not comment on; the ones it did are threads. Fixed:
-  the alert closes itself once the next analysis no longer reports it, and if
-  it is still open after that, the fix did not take. Declined or Flagged: put
+  code-scanning bot did not comment on; the ones it did are threads. They are
+  work only while `alerts_current` holds. Fixed: the alert closes itself once
+  the next analysis no longer reports it; still open while `alerts_current`
+  holds on a head with the fix, the fix did not take. Declined or Flagged: put
   its id (`code-scanning:<number>`) in the summary's `handled` marker, and
   leave the alert open for a person.
 

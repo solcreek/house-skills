@@ -93,6 +93,8 @@ alert() { # alert NUMBER [STATE] — a CodeQL alert as the alerts API returns it
   echo "{\"number\": $1, \"state\": \"${2:-open}\", \"html_url\": \"https://github.com/solcreek/x/security/code-scanning/$1\", \"rule\": {\"id\": \"js/xss\", \"severity\": \"error\", \"security_severity_level\": \"high\"}, \"tool\": {\"name\": \"CodeQL\"}, \"most_recent_instance\": {\"commit_sha\": \"$HEAD\", \"location\": {\"path\": \"a.js\", \"start_line\": 4}, \"message\": {\"text\": \"Cross-site scripting\"}}}"
 }
 
+SCANNED='{"__typename": "CheckRun", "name": "CodeQL", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "x", "detailsUrl": "d", "checkSuite": {"app": {"slug": "github-advanced-security"}, "workflowRun": null}}'
+
 ME=$(user me); ALICE=$(user alice); EVE=$(user eve)
 COPILOT=$(bot copilot-pull-request-reviewer); VERCEL=$(bot vercel); GHAS=$(bot github-advanced-security)
 
@@ -249,16 +251,22 @@ check "Copilot already asked: no first request" \
   ".timeline = [$(asked 1)]" '.copilot.auto == false and (.copilot.first_request | not)'
 
 echo "== code scanning"
-check "an open alert is work once checks are done" \
+check "an open alert is work once code scanning has analysed the head" \
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED]" \
+  '.alerts == [{id: "code-scanning:12", number: 12, url: "https://github.com/solcreek/x/security/code-scanning/12", rule: "js/xss", severity: "high", tool: "CodeQL", path: "a.js", line: 4, message: "Cross-site scripting"}] and .alerts_current and .work == 1 and (.done | not)'
+check "right after a push, before any check exists, an alert is listed but not work" \
   ".alerts = [$(alert 12)]" \
-  '.alerts == [{id: "code-scanning:12", number: 12, url: "https://github.com/solcreek/x/security/code-scanning/12", rule: "js/xss", severity: "high", tool: "CodeQL", path: "a.js", line: 4, message: "Cross-site scripting", commit: "'"$HEAD"'"}] and .work == 1 and (.done | not)'
+  '(.alerts | length) == 1 and (.alerts_current | not) and .work == 0'
 check "while a check runs, an alert is listed but not work" \
-  ".alerts = [$(alert 12)] | .checks = [$(run_check 'Analyze (javascript)' IN_PROGRESS null x)]" \
-  '(.alerts | length) == 1 and .work == 0'
+  ".alerts = [$(alert 12)] | .checks = [$SCANNED, $(run_check 'Analyze (javascript)' IN_PROGRESS null x)]" \
+  '(.alerts | length) == 1 and (.alerts_current | not) and .work == 0'
+check "a check named CodeQL from another app is not code scanning's" \
+  ".alerts = [$(alert 12)] | .checks = [$(run_check CodeQL COMPLETED '"SUCCESS"' x)]" \
+  '(.alerts_current | not) and .work == 0'
 check "a closed alert is nothing" ".alerts = [$(alert 12 fixed)]" '.alerts == [] and .done'
 check "unreadable alerts are null, not none" '.alerts = null' '.alerts == null and .done'
 check "a handled marker of the token's clears a declined alert" \
-  ".alerts = [$(alert 12), $(alert 13)] | .comments = [$(comment c1 "$ME" MEMBER 'x <!-- babysit-pr --> <!-- babysit-pr:handled code-scanning:12 -->')]" \
+  ".alerts = [$(alert 12), $(alert 13)] | .checks = [$SCANNED] | .comments = [$(comment c1 "$ME" MEMBER 'x <!-- babysit-pr --> <!-- babysit-pr:handled code-scanning:12 -->')]" \
   '.alerts | map(.number) == [13]'
 check "a handled marker from anyone else does not" \
   ".alerts = [$(alert 12)] | .comments = [$(comment c1 "$ALICE" MEMBER '<!-- babysit-pr:handled code-scanning:12 -->')]" \

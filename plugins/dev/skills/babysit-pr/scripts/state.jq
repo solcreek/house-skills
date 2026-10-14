@@ -173,11 +173,20 @@ def alerts:
          rule: .rule.id, severity: (.rule.security_severity_level // .rule.severity),
          tool: .tool.name,
          path: .most_recent_instance.location.path, line: .most_recent_instance.location.start_line,
-         message: (.most_recent_instance.message.text // "" | clean),
-         commit: .most_recent_instance.commit_sha})
+         message: (.most_recent_instance.message.text // "" | clean)})
   | map(select(.id as $id | $done | index($id) | not))
   | sort_by(.number)
   end;
+
+# Whether code scanning has analysed the head. An alert's commit cannot tell:
+# a PR is analysed on its merge ref, so that commit is the merge commit, never
+# the head. Code scanning also posts a check on the head itself, from the
+# github-advanced-security app, once it has processed that head's analysis;
+# until then a push has no such check, and the open alerts still describe the
+# previous one, where a just-fixed alert looks unfixed.
+def code_scanned:
+  any(nodes($checks; .data.repository.object.statusCheckRollup.contexts)[];
+      .__typename == "CheckRun" and .checkSuite.app.slug? == "github-advanced-security");
 
 if refusal then {refused: refusal, url: pr.url?}
 else
@@ -202,10 +211,11 @@ else
      withheld: ($th.withheld + $rv.withheld + $cm.withheld),
      ignored_bot_items: ($rv.ignored + $cm.ignored)}
   | .settled = ((.checks.pending | length) == 0 and .copilot.pending == 0 and .mergeable != "UNKNOWN")
-  # While a check runs, the open alerts may still describe an older commit, so
-  # they become work only once every check is done.
+  # The open alerts describe the head only once code scanning has analysed it
+  # and no check is still running; until then they are listed but not work.
+  | .alerts_current = (.alerts != null and (.checks.pending | length) == 0 and code_scanned)
   | .work = ((.threads | length) + (.reviews | length) + (.comments | length) + (.checks.failing | length)
-             + (if (.checks.pending | length) == 0 then (.alerts // [] | length) else 0 end)
+             + (if .alerts_current then (.alerts | length) else 0 end)
              + (if .mergeable == "CONFLICTING" or .merge_state == "BEHIND" then 1 else 0 end))
   | .done = (.state == "OPEN" and .settled and .work == 0 and .mergeable == "MERGEABLE")
 end
