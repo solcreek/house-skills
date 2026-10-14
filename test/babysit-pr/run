@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for babysit-pr's state.jq: trust, convergence and the check rollup.
+# Tests for babysit-pr's state.jq: trust, convergence, the check rollup and
+# code-scanning alerts.
 # Each case edits one base "world" (a PR plus its feedback), feeds it to
 # state.jq in the same page shapes pr-state fetches, and asserts on the output.
 # No network, no gh.
@@ -24,7 +25,7 @@ base=$(jq -nc --arg head "$HEAD" '{
        mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
        author: {__typename: "User", login: "me"}, authorAssociation: "MEMBER",
        labels: {nodes: []}, reviewRequests: {nodes: []}},
-  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [], rules: [],
+  reviews: [], comments: [], threads: [], timeline: [], checks: [], runs: [], rules: [], alerts: [],
   now: 1791288000}')
 
 user() { echo "{\"__typename\": \"User\", \"login\": \"$1\"}"; }
@@ -43,8 +44,9 @@ run() {
          else [{data: {repository: {object: {statusCheckRollup: {contexts: {nodes: .checks}}}}}}] end' <<<"$w" > "$tmp/checks"
   jq -c '.runs' <<<"$w" > "$tmp/runs"
   jq -c '.rules' <<<"$w" > "$tmp/rules"
+  jq -c 'if .alerts == null then null else [.alerts] end' <<<"$w" > "$tmp/alerts"
   jq -n -c -f "$jqfile" \
-    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" --slurpfile rules "$tmp/rules" \
+    --argjson now "$(jq -r .now <<<"$w")" --slurpfile runs "$tmp/runs" --slurpfile rules "$tmp/rules" --slurpfile alerts "$tmp/alerts" \
     --arg orgs "$(jq -r .orgs <<<"$w")" --arg bots "$(jq -r .bots <<<"$w")" \
     --slurpfile head "$tmp/head" --slurpfile reviews "$tmp/reviews" --slurpfile comments "$tmp/comments" \
     --slurpfile threads "$tmp/threads" --slurpfile timeline "$tmp/timeline" --slurpfile checks "$tmp/checks"
@@ -87,8 +89,12 @@ run_check() { # run_check NAME STATUS CONCLUSION STARTED [EVENT]
   echo "{\"__typename\": \"CheckRun\", \"name\": \"$1\", \"status\": \"$2\", \"conclusion\": $3, \"startedAt\": \"$4\", \"detailsUrl\": \"d\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}, \"workflowRun\": {\"databaseId\": 9, \"event\": \"${5:-pull_request}\", \"workflow\": {\"name\": \"CI\"}}}}"
 }
 
+alert() { # alert NUMBER [STATE] — a CodeQL alert as the alerts API returns it
+  echo "{\"number\": $1, \"state\": \"${2:-open}\", \"html_url\": \"https://github.com/solcreek/x/security/code-scanning/$1\", \"rule\": {\"id\": \"js/xss\", \"severity\": \"error\", \"security_severity_level\": \"high\"}, \"tool\": {\"name\": \"CodeQL\"}, \"most_recent_instance\": {\"commit_sha\": \"$HEAD\", \"location\": {\"path\": \"a.js\", \"start_line\": 4}, \"message\": {\"text\": \"Cross-site scripting\"}}}"
+}
+
 ME=$(user me); ALICE=$(user alice); EVE=$(user eve)
-COPILOT=$(bot copilot-pull-request-reviewer); VERCEL=$(bot vercel)
+COPILOT=$(bot copilot-pull-request-reviewer); VERCEL=$(bot vercel); GHAS=$(bot github-advanced-security)
 
 echo "== convergence"
 check "a quiet, green, mergeable PR is done" '.' '.done and .settled and .work == 0'
@@ -241,6 +247,30 @@ check "unreadable rules are not 'no rule': no first request" \
   '.rules = null' '.copilot.auto == null and (.copilot.first_request | not)'
 check "Copilot already asked: no first request" \
   ".timeline = [$(asked 1)]" '.copilot.auto == false and (.copilot.first_request | not)'
+
+echo "== code scanning"
+check "an open alert is work once checks are done" \
+  ".alerts = [$(alert 12)]" \
+  '.alerts == [{id: "code-scanning:12", number: 12, url: "https://github.com/solcreek/x/security/code-scanning/12", rule: "js/xss", severity: "high", tool: "CodeQL", path: "a.js", line: 4, message: "Cross-site scripting", commit: "'"$HEAD"'"}] and .work == 1 and (.done | not)'
+check "while a check runs, an alert is listed but not work" \
+  ".alerts = [$(alert 12)] | .checks = [$(run_check 'Analyze (javascript)' IN_PROGRESS null x)]" \
+  '(.alerts | length) == 1 and .work == 0'
+check "a closed alert is nothing" ".alerts = [$(alert 12 fixed)]" '.alerts == [] and .done'
+check "unreadable alerts are null, not none" '.alerts = null' '.alerts == null and .done'
+check "a handled marker of the token's clears a declined alert" \
+  ".alerts = [$(alert 12), $(alert 13)] | .comments = [$(comment c1 "$ME" MEMBER 'x <!-- babysit-pr --> <!-- babysit-pr:handled code-scanning:12 -->')]" \
+  '.alerts | map(.number) == [13]'
+check "a handled marker from anyone else does not" \
+  ".alerts = [$(alert 12)] | .comments = [$(comment c1 "$ALICE" MEMBER '<!-- babysit-pr:handled code-scanning:12 -->')]" \
+  '(.alerts | length) == 1'
+check "an alert the code-scanning bot opened a thread for is left to the thread" \
+  ".alerts = [$(alert 12), $(alert 13)] | .threads = [$(thread t1 true "$(comment k1 "$GHAS" NONE '## CodeQL / XSS
+
+[Show more details](https://github.com/solcreek/x/security/code-scanning/12)')")]" \
+  '.alerts | map(.number) == [13]'
+check "a link to an alert in someone else's thread does not hide it" \
+  ".alerts = [$(alert 12)] | .threads = [$(thread t1 false "$(comment k1 "$ALICE" MEMBER 'see https://github.com/solcreek/x/security/code-scanning/12')")]" \
+  '(.alerts | length) == 1'
 
 echo "== request-copilot"
 rc=0; out=$(BABYSIT_COPILOT=never "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?

@@ -60,6 +60,10 @@ pushes fixes. Copilot reviews are billed per review, so set
 `"BABYSIT_COPILOT": "never"` to stop the skill from asking at all; rulesets
 still trigger their own reviews.
 
+**Code scanning.** The skill reads the PR's open code-scanning alerts, not
+only the ones the code-scanning bot comments on, and treats them as feedback
+once the analysis has finished. It never dismisses an alert.
+
 **After `gh pr create`.** When Claude opens a PR with `gh pr create`, a hook
 in the `dev` plugin has it offer `/dev:babysit-pr <url>`. It only suggests;
 the skill is manual-only and starts when you type it. Set

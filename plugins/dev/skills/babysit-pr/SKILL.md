@@ -90,12 +90,15 @@ then push **once**.
      the diff cannot reach) → `gh run rerun <run_id> --failed`, **once per
      check per head**. Failing again → a person's call.
    - No `run_id` (an external status) → a person's call; give its `url`.
-3. **Feedback**: `threads`, `reviews` and `comments`. Triage every item per
-   [references/triage.md](references/triage.md) into **Fixed**, **Declined** or
-   **Flagged**, subject to [references/safety.md](references/safety.md).
+3. **Feedback**: `threads`, `reviews`, `comments` and `alerts`. Triage every
+   item per [references/triage.md](references/triage.md) into **Fixed**,
+   **Declined** or **Flagged**, subject to [references/safety.md](references/safety.md).
    Read a Copilot review body in full: findings under "Previously missed"
    exist nowhere else, and its summary sentence ("no new comments") is not a
-   verdict.
+   verdict. `alerts` are the PR's open code-scanning alerts; triage them only
+   once `checks.pending` is empty, since until the analysis finishes they may
+   describe an older commit. `alerts: null` means they could not be read
+   (no code scanning, or no access): say so in the final report.
 4. **Commit** each fix on its own (one finding, one commit, tests with it),
    in the repo's commit style, after running the narrowest relevant tests.
    A fix that breaks tests gets reverted, and the item becomes Flagged.
@@ -118,8 +121,9 @@ then push **once**.
      `$S/thread resolve <id>`.
    - Thread, Flagged → reply `Flagged for human review — <the decision needed>`;
      leave it open.
-   - Review bodies and PR comments have no thread: answer them in the summary
-     comment and list their ids in its `handled` marker.
+   - Review bodies, PR comments and alerts have no thread: answer them in the
+     summary comment and list their ids in its `handled` marker. A Fixed
+     alert needs no marker: it closes once an analysis stops reporting it.
    Pipe replies on stdin, and end every reply with the tag line
    `<!-- babysit-pr -->`: `printf '%s\n\n<!-- babysit-pr -->' "$body" | $S/thread reply <id>`.
    The tag is how `pr-state` tells your replies from the person running the
@@ -192,6 +196,7 @@ Output only:
 - Cycles, runtime, Copilot requests (and whether the repo reviews
   automatically), local reviews
 - Fixed / declined / flagged counts by source (threads, review bodies,
-  comments, CI, local review); commits as `<sha> <subject>`
+  comments, code-scanning alerts, CI, local review); commits as
+  `<sha> <subject>`
 - Open items with links and who must decide; withheld links
 - PR state, head sha, check summary
