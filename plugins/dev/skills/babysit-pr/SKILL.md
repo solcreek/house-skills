@@ -118,8 +118,10 @@ then push **once**.
      marker.
    - exit 3 → nothing declared: launch one read-only subagent with
      [references/local-review.md](references/local-review.md).
-   - exit 1 → the declaration is broken: use the subagent, and put the stderr
-     line in the final report.
+   - exit 4 → the declaration on the base branch is broken: use the
+     subagent, and put the stderr line in the final report.
+   - exit 1 → it could not look: `git fetch origin $base` and ask once more;
+     failing again, use the subagent and report the stderr line.
 
    Triage the findings like any other; fix and commit what you adopt. The
    summary comment's `reviewed` marker records the exact HEAD the review saw —

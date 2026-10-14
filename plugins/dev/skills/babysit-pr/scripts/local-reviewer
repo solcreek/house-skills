@@ -19,8 +19,9 @@
 # Prints one JSON line. Exit codes:
 #   0  {"command": "...", "source": "AGENTS.md"} — run this command
 #   3  {"declared": false} — nothing declared; use the subagent
-#   1  could not tell: origin/BASE missing, or a declaration that is not one
-#      command line containing {since} (message on stderr)
+#   4  a broken declaration: not exactly one command line, or one without
+#      {since} (message on stderr)
+#   1  could not look: origin/BASE missing, or jq missing (message on stderr)
 #   2  usage
 set -euo pipefail
 
@@ -67,16 +68,16 @@ for file in REVIEW.md AGENTS.md CLAUDE.md; do
   [ "$blocks" -eq 0 ] && continue
   if [ "$blocks" -gt 1 ]; then
     echo "local-reviewer: $file on origin/$base declares $blocks reviewers; it must declare one" >&2
-    exit 1
+    exit 4
   fi
   lines=$(sed -n 's/^L.//p' <<<"$found")
   if [ -z "$lines" ] || [ "$(wc -l <<<"$lines")" -ne 1 ]; then
     echo "local-reviewer: the reviewer block in $file on origin/$base must hold exactly one command line" >&2
-    exit 1
+    exit 4
   fi
   if [[ "$lines" != *"{since}"* ]]; then
     echo "local-reviewer: the reviewer in $file on origin/$base must take {since}, or it reviews more than the new commits" >&2
-    exit 1
+    exit 4
   fi
   jq -nc --arg c "${lines//\{since\}/$since}" --arg s "$file" '{command: $c, source: $s}'
   exit 0
