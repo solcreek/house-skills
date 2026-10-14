@@ -120,7 +120,8 @@ then push **once**.
    base, which would otherwise put everything the base gained under review:
    `$S/review-range $base <since>` prints `{since, segments, merges}`.
    - Its `since` replaces `<since>` below: the reviewer covers the commits
-     after the last base merge.
+     after the last base merge. When it equals `git rev-parse HEAD` (the
+     merge is the last commit), nothing is left for the reviewer: skip it.
    - Each segment holds the agent's commits before a merge: review it with
      the subagent, its `since` and `head` as `<SINCE>` and `<HEAD>`.
    - Each merge's own resolution is `git show --remerge-diff <merge>`, empty
