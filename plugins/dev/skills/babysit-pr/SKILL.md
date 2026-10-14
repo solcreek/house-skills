@@ -133,8 +133,8 @@ then push **once**.
        them, say so in the final report.
      - `kind: "subagent"` → launch one read-only subagent with
        [references/local-review.md](references/local-review.md). A `why`
-       other than "nothing declared" is a declaration that could not be read
-       or used: put it in the final report.
+       other than "nothing declared" is a broken declaration: put it in the
+       final report.
    - Each segment holds the agent's commits before a merge: review it with
      the subagent, its `since` and `head` as `<SINCE>` and `<HEAD>`.
    - Each merge's own resolution is `git show --remerge-diff <merge>`, empty

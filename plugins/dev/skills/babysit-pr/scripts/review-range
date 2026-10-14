@@ -20,7 +20,7 @@
 #   reviewer  who reviews S..HEAD, from local-reviewer: {"kind": "repository",
 #             "command": ..., "source": ...} with S filled in, or
 #             {"kind": "subagent", "why": ...} when the repository declares
-#             none or its declaration could not be used. One call answers both
+#             none or its declaration is broken. One call answers both
 #             questions, so the reviewer is never left unasked.
 #
 # With no such merge in the range: since is SINCE, segments and merges empty.
@@ -30,7 +30,8 @@
 # line.
 #
 # Exit codes: 0 the JSON above · 1 could not tell (origin/BASE missing, SINCE
-# not on HEAD's first-parent line; message on stderr) · 2 usage
+# not on HEAD's first-parent line, the declaration on origin/BASE unreadable;
+# message on stderr) · 2 usage
 set -euo pipefail
 
 usage="usage: review-range BASE SINCE"
@@ -49,7 +50,9 @@ answer() {
   case $rc in
     0) reviewer=$(jq -c '{kind: "repository"} + .' <<<"$out") ;;
     3) reviewer='{"kind": "subagent", "why": "nothing declared"}' ;;
-    *) reviewer=$(jq -nc --arg why "$(tail -n 1 "$err")" '{kind: "subagent", why: $why}') ;;
+    4) reviewer=$(jq -nc --arg why "$(tail -n 1 "$err")" '{kind: "subagent", why: $why}') ;;
+    # Could not look is not "nothing declared": step 5 fetches and asks again.
+    *) tail -n 1 "$err" >&2; rm -f "$err"; exit 1 ;;
   esac
   rm -f "$err"
   jq -nc --arg since "$1" --argjson merges "$2" --argjson segments "$3" --argjson reviewer "$reviewer" \

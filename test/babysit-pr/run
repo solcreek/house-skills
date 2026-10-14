@@ -487,6 +487,13 @@ printf '%s\n' '```babysit-pr-reviewer' 'bin/review --all' '```' > "$range/REVIEW
 gitg commit -qam "break the reviewer" && gitg update-ref refs/remotes/origin/main main && gitg switch -q feat
 ranged "a broken declaration falls back to the subagent, saying why" "$f1" \
   '.reviewer.kind == "subagent" and (.reviewer.why | test("must take [{]since[}]"))'
+blob=$(gitg rev-parse origin/main:REVIEW.md)
+mv "$range/.git/objects/${blob:0:2}/${blob:2}" "$tmp/review-blob"
+rc=0; out=$(cd "$range" && "$rr" main "$f1" 2>&1) || rc=$?
+mv "$tmp/review-blob" "$range/.git/objects/${blob:0:2}/${blob:2}"
+if [ "$rc" -eq 1 ] && grep -q "could not read REVIEW.md" <<<"$out"; then
+  echo "ok   an unreadable declaration is a failure, not the subagent"; pass=$((pass + 1))
+else echo "FAIL unreadable declaration: exit $rc: $out"; fail=$((fail + 1)); fi
 
 echo "== copilot-candidates"
 cc="$root/plugins/dev/skills/babysit-pr/scripts/copilot-candidates"
