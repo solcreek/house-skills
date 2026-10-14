@@ -490,10 +490,17 @@ ranged "a broken declaration falls back to the subagent, saying why" "$f1" \
 blob=$(gitg rev-parse origin/main:REVIEW.md)
 mv "$range/.git/objects/${blob:0:2}/${blob:2}" "$tmp/review-blob"
 rc=0; out=$(cd "$range" && "$rr" main "$f1" 2>&1) || rc=$?
-mv "$tmp/review-blob" "$range/.git/objects/${blob:0:2}/${blob:2}"
-if [ "$rc" -eq 1 ] && grep -q "could not read REVIEW.md" <<<"$out"; then
-  echo "ok   an unreadable declaration is a failure, not the subagent"; pass=$((pass + 1))
+if [ "$rc" -eq 0 ] && jq -e '(.segments | length) > 0 and .reviewer.kind == "unknown" and (.reviewer.why | test("could not read REVIEW.md"))' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   an unreadable declaration is unknown, not the subagent, and keeps the split"; pass=$((pass + 1))
 else echo "FAIL unreadable declaration: exit $rc: $out"; fail=$((fail + 1)); fi
+mv "$tmp/review-blob" "$range/.git/objects/${blob:0:2}/${blob:2}"
+base_moves m5
+gitg merge -q --no-ff -m "merge main" origin/main
+blob=$(gitg rev-parse origin/main:REVIEW.md)
+mv "$range/.git/objects/${blob:0:2}/${blob:2}" "$tmp/review-blob"
+ranged "a merge as the last commit leaves no reviewer, without asking for one" "$f1" \
+  '.since == "'"$(gitg rev-parse HEAD)"'" and .reviewer == null and (.segments | length) > 0'
+mv "$tmp/review-blob" "$range/.git/objects/${blob:0:2}/${blob:2}"
 
 echo "== copilot-candidates"
 cc="$root/plugins/dev/skills/babysit-pr/scripts/copilot-candidates"

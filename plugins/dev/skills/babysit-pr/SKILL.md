@@ -120,9 +120,8 @@ then push **once**.
    reviews it: `$S/review-range $base <since>` prints
    `{since, segments, merges, reviewer}`. It splits the range at merges of the
    base, which would otherwise put everything the base gained under review.
-   - Review its `since..HEAD` with its `reviewer`. When `since` equals
-     `git rev-parse HEAD` (the merge is the last commit), nothing is left for
-     the reviewer: skip it.
+   - Review its `since..HEAD` with its `reviewer`. `reviewer: null` → `since`
+     is HEAD (the merge is the last commit) and nothing is left: skip it.
      - `kind: "repository"` → the repository declared its own reviewer: run
        its `command` exactly as printed, with a 10-minute Bash timeout. Exit 0
        means the review is complete; read its findings as the repository's
@@ -135,6 +134,9 @@ then push **once**.
        [references/local-review.md](references/local-review.md). A `why`
        other than "nothing declared" is a broken declaration: put it in the
        final report.
+     - `kind: "unknown"` → the declaration could not be read:
+       `git fetch origin $base` and run `review-range` once more; still
+       unknown, use the subagent and put the `why` in the final report.
    - Each segment holds the agent's commits before a merge: review it with
      the subagent, its `since` and `head` as `<SINCE>` and `<HEAD>`.
    - Each merge's own resolution is `git show --remerge-diff <merge>`, empty
