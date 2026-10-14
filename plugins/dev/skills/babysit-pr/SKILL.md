@@ -99,7 +99,11 @@ then push **once**.
    **Declined** or **Flagged**, subject to [references/safety.md](references/safety.md).
    Read a Copilot review body in full: findings under "Previously missed"
    exist nowhere else, and its summary sentence ("no new comments") is not a
-   verdict. `alerts` are the PR's open code-scanning alerts; triage them only
+   verdict. When the body claims findings that no item carries ("five
+   moderate findings remain" over "0 open findings", or a headline naming
+   issues no item names), run `$S/copilot-candidates $R <branch> <the
+   review's commit>`: the locations Copilot weighed, from its run log, each
+   one triaged per [references/triage.md](references/triage.md). `alerts` are the PR's open code-scanning alerts; triage them only
    when `alerts_current` is true (code scanning has analysed this head and no
    check is running). Until then they may describe the previous push, where a
    fix you just made still looks unfixed. `alerts: null` means they could not

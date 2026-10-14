@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Tests for babysit-pr's state.jq (trust, convergence, the check rollup and
-# code-scanning alerts) and its local-reviewer and review-range scripts.
+# code-scanning alerts) and its local-reviewer, review-range and
+# copilot-candidates scripts.
 # Each case edits one base "world" (a PR plus its feedback), feeds it to
 # state.jq in the same page shapes pr-state fetches, and asserts on the output.
-# No network; the git scripts run against scratch repositories.
+# No network: the git scripts run against scratch repositories, and
+# copilot-candidates against a stand-in gh.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -458,6 +460,65 @@ rc=0; out=$(cd "$range" && "$rr" nope "$f1" 2>&1) || rc=$?
 if [ "$rc" -eq 1 ] && grep -q "not found" <<<"$out"; then
   echo "ok   a missing origin/BASE is a failure"; pass=$((pass + 1))
 else echo "FAIL missing base: exit $rc: $out"; fail=$((fail + 1)); fi
+
+echo "== copilot-candidates"
+cc="$root/plugins/dev/skills/babysit-pr/scripts/copilot-candidates"
+SHA=cccccccccccccccccccccccccccccccccccccccc
+mkdir -p "$tmp/bin"
+# A stand-in gh: the runs listing comes from $FAKE_RUNS (unset = the call
+# fails), the log from $FAKE_LOG (unset = expired); every call is recorded.
+cat > "$tmp/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_CALLS"
+case "$1" in
+  api) [ -n "${FAKE_RUNS:-}" ] || exit 1; cat "$FAKE_RUNS" ;;
+  run) [ -n "${FAKE_LOG:-}" ] || exit 1; cat "$FAKE_LOG" ;;
+  *) exit 64 ;;
+esac
+STUB
+chmod +x "$tmp/bin/gh"
+export FAKE_CALLS="$tmp/calls"
+copilot_runs() { # copilot_runs JSON-RUNS — writes the runs listing
+  jq -nc --argjson r "$1" '{workflow_runs: $r}' > "$tmp/runs.json"
+}
+cand() { # cand NAME EXIT ASSERTION — runs copilot-candidates on o/r feat $SHA; ASSERTION on the slurped output
+  local out rc=0
+  : > "$FAKE_CALLS"
+  out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && { [ -z "$3" ] || jq -se "$3" <<<"$out" >/dev/null 2>&1; }; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $2: $out"; fail=$((fail + 1))
+  fi
+}
+P='"dynamic/agents/copilot-pull-request-reviewer"'
+copilot_runs "[{\"id\": 1, \"path\": $P, \"status\": \"completed\", \"created_at\": \"2026-10-01T00:00:00Z\"},
+               {\"id\": 2, \"path\": $P, \"status\": \"completed\", \"created_at\": \"2026-10-02T00:00:00Z\"},
+               {\"id\": 3, \"path\": $P, \"status\": \"in_progress\", \"created_at\": \"2026-10-03T00:00:00Z\"},
+               {\"id\": 4, \"path\": \"other\", \"status\": \"completed\", \"created_at\": \"2026-10-04T00:00:00Z\"}]"
+printf '%s\n' \
+  $'job\tstep\t2026-10-14T02:46:04Z CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=27, end=29, fixed=false, severity=moderate)' \
+  $'job\tstep\t2026-10-14T02:46:05Z some other line' \
+  $'job\tstep\t2026-10-14T02:46:06Z CCR Agent: Comment stored (id=002, type=bug, file=a.ts, start=27, end=29, fixed=false, severity=moderate)' \
+  $'job\tstep\t2026-10-14T02:46:07Z \e[0mCCR Agent: Comment stored (id=001, type=spelling, file=docs/b.md, start=4, end=4, fixed=false, severity=low)' \
+  > "$tmp/log"
+export FAKE_RUNS="$tmp/runs.json" FAKE_LOG="$tmp/log"
+cand "candidates come out one per location, duplicates dropped" 0 \
+  '. == [{path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate"}, {path: "docs/b.md", start: 4, end: 4, type: "spelling", severity: "low"}]'
+if grep -q "head_sha=$SHA" "$FAKE_CALLS" && grep -q '^run view 2 ' "$FAKE_CALLS"; then
+  echo "ok   the newest completed Copilot run for the commit is the one read"; pass=$((pass + 1))
+else echo "FAIL run choice: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
+printf 'job\tstep\tnothing stored here\n' > "$tmp/log"
+cand "a log with no candidates is an empty answer" 0 '. == []'
+copilot_runs '[]'
+cand "no completed run for the commit is exit 3, not an empty answer" 3 '. == [{run: null}]'
+copilot_runs "[{\"id\": 2, \"path\": $P, \"status\": \"completed\", \"created_at\": \"2026-10-02T00:00:00Z\"}]"
+FAKE_LOG="" cand "an expired log is exit 3" 3 '. == [{run: 2, log: null}]'
+FAKE_RUNS="" cand "a failed runs listing is exit 1" 1 ''
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat abc123 2>&1) || rc=$?
+if [ "$rc" -eq 2 ]; then echo "ok   COMMIT must be a full sha"; pass=$((pass + 1))
+else echo "FAIL COMMIT must be a full sha: exit $rc: $out"; fail=$((fail + 1)); fi
+unset FAKE_RUNS FAKE_LOG
 
 echo "== request-copilot"
 rc=0; out=$(BABYSIT_COPILOT=never "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?

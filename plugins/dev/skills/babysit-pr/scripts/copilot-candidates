@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# copilot-candidates OWNER/REPO BRANCH COMMIT
+#
+# The locations Copilot considered when it reviewed COMMIT, read from its
+# review run's log. A Copilot review can claim findings it never posts ("five
+# moderate findings and two nits remain" over "0 open findings"); the log
+# names each candidate it stored, by file and line, without its text:
+#
+#   CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=27, end=29, fixed=false, severity=moderate)
+#
+# Prints NDJSON, one candidate per line, duplicates dropped:
+#   {"path": "a.ts", "start": 27, "end": 29, "type": "bug", "severity": "moderate"}
+# Candidates include the ones Copilot did post as threads.
+#
+# The log is CI output of a trusted review bot, read like any check log; it
+# carries file names and numbers, no prose.
+#
+# Exit codes: 0 the candidates (none is an empty answer) · 3 no completed
+# Copilot run for COMMIT, or its log has expired · 1 a read failed · 2 usage
+set -euo pipefail
+
+usage="usage: copilot-candidates OWNER/REPO BRANCH COMMIT"
+repo=${1:?$usage}
+branch=${2:?$usage}
+commit=${3:?$usage}
+[[ "$repo" == */* ]] || { echo "$usage" >&2; exit 2; }
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "copilot-candidates: COMMIT must be a full sha" >&2; exit 2; }
+command -v jq >/dev/null || { echo "copilot-candidates needs jq" >&2; exit 1; }
+
+runs=$(gh api -X GET "repos/$repo/actions/runs" -f branch="$branch" -f event=dynamic -f head_sha="$commit" -f per_page=100) \
+  || { echo "copilot-candidates: could not list the runs for $commit" >&2; exit 1; }
+run=$(jq -r '[.workflow_runs[]? | select(.path == "dynamic/agents/copilot-pull-request-reviewer" and .status == "completed")]
+             | sort_by(.created_at) | last | .id // empty' <<<"$runs")
+[ -n "$run" ] || { echo '{"run": null}'; exit 3; }
+
+# `gh run view --log`, not the jobs/logs API: gh api refuses a body carrying
+# terminal escape sequences, which this log does.
+log=$(gh run view "$run" --repo "$repo" --log 2>/dev/null) || { echo "{\"run\": $run, \"log\": null}"; exit 3; }
+
+stored=$(grep -o 'CCR Agent: Comment stored ([^)]*)' <<<"$log" || true)
+[ -n "$stored" ] || exit 0
+sed -e 's/^CCR Agent: Comment stored (//' -e 's/)$//' <<<"$stored" \
+  | jq -Rc 'split(", ") | map(capture("^(?<key>[a-z_]+)=(?<value>.*)$")) | from_entries
+            | {path: .file, start: (.start | tonumber? // null), end: (.end | tonumber? // null), type, severity}' \
+  | jq -sc 'unique_by([.path, .start, .end, .type]) | .[]'
