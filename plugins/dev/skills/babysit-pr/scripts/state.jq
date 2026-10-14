@@ -71,6 +71,13 @@ def refusal:
 # re-run. A workflow triggered by both push and pull_request runs the same
 # check twice on one commit; those are separate checks, keyed by event, so a
 # pass under one never hides a failure under the other.
+#
+# A failing check from code scanning (app github-advanced-security, no
+# workflow run) is its verdict on the head's alerts: "1 new alert including 1
+# high severity security vulnerability". It has no log to read and nothing to
+# re-run; its findings arrive as alerts and the bot's threads. It is marked
+# code_scanning, and a FAILURE is not work by itself (see .work). Cancelled or
+# timed out, there was no analysis, and it stays work like any check.
 def checks:
   nodes($checks; .data.repository.object.statusCheckRollup.contexts)
   | map(if .__typename == "CheckRun" then
@@ -81,6 +88,7 @@ def checks:
            conclusion: (.conclusion // .status),
            event: .checkSuite.workflowRun.event,
            run_id: .checkSuite.workflowRun.databaseId,
+           code_scanning: (.checkSuite.app.slug? == "github-advanced-security"),
            url: .detailsUrl}
         else
           {name: .context, at: (.createdAt // ""),
@@ -89,7 +97,9 @@ def checks:
            conclusion: .state, event: null, run_id: null, url: .targetUrl}
         end)
   | group_by([.name, .event]) | map(sort_by(.at) | last)
-  | {failing: map(select(.failed) | del(.at, .pending, .failed) | if .event == null then del(.event) else . end),
+  | {failing: map(select(.failed) | del(.at, .pending, .failed)
+                  | if .event == null then del(.event) else . end
+                  | if .code_scanning then . else del(.code_scanning) end),
      pending: map(select(.pending) | .name),
      passed: map(select((.pending or .failed) | not)) | length};
 
@@ -223,8 +233,13 @@ else
   # The open alerts describe the head only once code scanning has analysed it
   # and no check is still running; until then they are listed but not work.
   | .alerts_current = (.alerts != null and (.checks.pending | length) == 0 and code_scanned)
-  | .work = ((.threads | length) + (.reviews | length) + (.comments | length) + (.checks.failing | length)
+  # A failing code-scanning check is not counted: its alerts and threads are
+  # the work, and counting it too would wake wait-pr at once, every poll, while
+  # the alerts wait for the rest of the checks. It still keeps the PR from done.
+  | .work = ((.threads | length) + (.reviews | length) + (.comments | length)
+             + (.checks.failing | map(select((.code_scanning and .conclusion == "FAILURE") | not)) | length)
              + (if .alerts_current then (.alerts | length) else 0 end)
              + (if .mergeable == "CONFLICTING" or .merge_state == "BEHIND" then 1 else 0 end))
-  | .done = (.state == "OPEN" and .settled and .work == 0 and .mergeable == "MERGEABLE")
+  | .done = (.state == "OPEN" and .settled and .work == 0 and (.checks.failing | length) == 0
+             and .mergeable == "MERGEABLE")
 end

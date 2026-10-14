@@ -82,7 +82,11 @@ then push **once**.
    `merge_state == "BEHIND"`: `git fetch origin $base && git merge origin/$base`,
    resolve keeping both sides' intent, run the affected tests, commit the merge.
    Never rebase: it needs a force push.
-2. **Failing checks** (`checks.failing`). For each, read the failure:
+2. **Failing checks** (`checks.failing`). A check with `code_scanning: true`
+   and conclusion `FAILURE` is code scanning's verdict on the alerts: no log,
+   no re-run. Handle its `alerts` and the code-scanning bot's threads in step
+   3; the check passes on the push whose analysis no longer reports them. For
+   every other check, read the failure:
    `gh run view <run_id> --log-failed | tail -n 200` (narrow with `grep` if
    long). Then:
    - Caused by this PR → fix it.
@@ -196,7 +200,9 @@ Stop with the final report when any of these hits:
 
 - **Done** — the clean exit.
 - **Only a person can move it** — every remaining item is Flagged, withheld,
-  or a check you may not re-run again. Don't wait on it.
+  or a check you may not re-run again. A code-scanning check still failing
+  once its alerts are all triaged counts: dismissing an alert is a person's
+  call. Don't wait on it.
 - **Same class, third time** — a third variation of one finding (a third
   bypass of one guard, a third edge of one rule): stop and escalate; the
   instrument is wrong, not the code.
