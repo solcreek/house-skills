@@ -79,7 +79,8 @@ findings are evidence about the approach, not a queue.
   the next analysis no longer reports it; still open while `alerts_current`
   holds on a head with the fix, the fix did not take. Declined or Flagged: put
   its id (`code-scanning:<number>`) in the summary's `handled` marker, and
-  leave the alert open for a person.
+  leave the alert open for a person. Its code-scanning check then stays
+  failing until that person dismisses it; say so in the summary.
 
 ## Code-scanning and security findings
 
