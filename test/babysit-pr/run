@@ -514,7 +514,7 @@ printf '%s\n' \
   > "$tmp/log"
 export FAKE_RUNS="$tmp/runs.json" FAKE_LOG="$tmp/log"
 cand "candidates come out one per location, duplicates dropped" 0 \
-  '. == [{path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate", fixed: false}, {path: "docs/b.md", start: 4, end: 4, type: "spelling", severity: "low", fixed: false}]'
+  '. == [{path: "a.ts", start: 27, end: 29, types: ["bug"], severities: ["moderate"], fixed: false}, {path: "docs/b.md", start: 4, end: 4, types: ["spelling"], severities: ["low"], fixed: false}]'
 if grep -q "head_sha=$SHA" "$FAKE_CALLS" && grep -q '^run view 2 ' "$FAKE_CALLS"; then
   echo "ok   the newest completed Copilot run for the commit is the one read"; pass=$((pass + 1))
 else echo "FAIL run choice: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
@@ -537,7 +537,7 @@ printf '%s\n' \
   > "$tmp/log"
 rc=0; : > "$FAKE_CALLS"
 out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>"$tmp/err") || rc=$?
-if [ "$rc" -eq 0 ] && jq -se '. == [{path: ".github/..x/a.ts", start: 1, end: 1, type: "bug", severity: "high", fixed: false}, {path: "a.ts", start: 27, end: 29, type: "bug", severity: "moderate", fixed: false}]' <<<"$out" >/dev/null 2>&1 \
+if [ "$rc" -eq 0 ] && jq -se '. == [{path: ".github/..x/a.ts", start: 1, end: 1, types: ["bug"], severities: ["high"], fixed: false}, {path: "a.ts", start: 27, end: 29, types: ["bug"], severities: ["moderate"], fixed: false}]' <<<"$out" >/dev/null 2>&1 \
    && grep -q "dropped 7 " "$tmp/err"; then
   echo "ok   only plain locations pass: prose in a field or a path leaving the checkout drops the line, and the drop is counted"; pass=$((pass + 1))
 else echo "FAIL field validation: exit $rc: $out / $(cat "$tmp/err")"; fail=$((fail + 1)); fi
@@ -548,6 +548,14 @@ printf '%s\n' \
   $'job\tstep\t2026-10-14T02:46:07Z CCR Agent: Comment stored (id=004, type=bug, file=c.ts, start=1, end=1, fixed=maybe, severity=high)' \
   $'job\tstep\t2026-10-14T02:46:08Z CCR Agent: Comment stored (id=005, type=bug, file=d.ts, start=1, end=1, severity=high)' \
   > "$tmp/log"
+printf '%s\n' \
+  $'job\tstep\t2026-10-14T02:46:04Z CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=60, end=60, fixed=false, severity=moderate)' \
+  $'job\tstep\t2026-10-14T02:46:05Z CCR Agent: Comment stored (id=003, type=codebase_conventions, file=a.ts, start=60, end=60, fixed=false, severity=low)' \
+  $'job\tstep\t2026-10-14T02:46:06Z CCR Agent: Comment stored (id=001, type=bug, file=a.ts, start=60, end=61, fixed=false, severity=moderate)' \
+  > "$tmp/log2"
+FAKE_LOG="$tmp/log2" cand "a location stored under two types is one candidate carrying both; other lines are another location" 0 \
+  '. == [{path: "a.ts", start: 60, end: 60, types: ["bug", "codebase_conventions"], severities: ["low", "moderate"], fixed: false},
+         {path: "a.ts", start: 60, end: 61, types: ["bug"], severities: ["moderate"], fixed: false}]'
 cand "fixed is carried as a boolean, null when it is not one; a location stored twice keeps fixed=false" 0 \
   'map({path, fixed}) == [{path: "a.ts", fixed: false}, {path: "b.ts", fixed: true}, {path: "c.ts", fixed: null}, {path: "d.ts", fixed: null}]'
 printf '%s\n' \
@@ -555,7 +563,7 @@ printf '%s\n' \
   $'job\tstep\t2026-10-14T02:46:05Z CCR Agent: Comment stored (id=002, type=bug, file=docs/a, b.md, start=1, end=1, fixed=false, severity=high)' \
   > "$tmp/log"
 rc=0; out=$(PATH="$tmp/bin:$PATH" "$cc" o/r feat "$SHA" 2>"$tmp/err") || rc=$?
-if [ "$rc" -eq 0 ] && jq -se '. == [{path: "src/a(1),b.ts", start: 3, end: 4, type: "bug", severity: "high", fixed: false}]' <<<"$out" >/dev/null 2>&1 \
+if [ "$rc" -eq 0 ] && jq -se '. == [{path: "src/a(1),b.ts", start: 3, end: 4, types: ["bug"], severities: ["high"], fixed: false}]' <<<"$out" >/dev/null 2>&1 \
    && grep -q "dropped 1 " "$tmp/err"; then
   echo "ok   a path holding ) or , is read whole: kept when plain, dropped when it has a space, never cut short"; pass=$((pass + 1))
 else echo "FAIL path with ) or ,: exit $rc: $out / $(cat "$tmp/err")"; fail=$((fail + 1)); fi
