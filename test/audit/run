@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Tests for cli:audit's probe. Each case probes a fixture tool in
+# test/audit/fixtures and asserts on the JSON and the exit code.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+probe="$root/plugins/cli/skills/audit/scripts/probe"
+fx="$root/test/audit/fixtures"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+pass=0
+fail=0
+
+# check NAME WANT_EXIT JQ_EXPR PROBE_ARGS... : runs the probe, asserts its
+# exit code and that JQ_EXPR is true of its output.
+check() {
+  local name=$1 want=$2 expr=$3; shift 3
+  local got=0
+  "$probe" "$@" > "$tmp/out" 2> "$tmp/err" || got=$?
+  if [ "$got" != "$want" ]; then
+    echo "FAIL $name: exit $got, want $want"; cat "$tmp/out" "$tmp/err"; fail=$((fail + 1)); return
+  fi
+  if ! jq -e "$expr" "$tmp/out" > /dev/null 2>&1; then
+    echo "FAIL $name: not true: $expr"; cat "$tmp/out"; fail=$((fail + 1)); return
+  fi
+  pass=$((pass + 1))
+}
+
+status() { echo "(.checks[] | select(.id == \"$1\") | .status) == \"$2\""; }
+
+# A tool that follows the conventions passes every check.
+check "good: all pass" 0 '.summary == {pass: 8}' -- "$fx/good"
+check "good: help on stdout" 0 '.checks[0].run.stdout | startswith("usage: good")' -- "$fx/good"
+check "good: unknown flag exit kept" 0 '.checks[] | select(.id == "unknown-flag") | .run.exit == 2' -- "$fx/good"
+check "good: argv recorded as data" 0 '.checks[0].run.argv[1] == "--help"' -- "$fx/good"
+check "good: command recorded" 0 ".command == [\"$fx/good\"]" -- "$fx/good"
+
+# Each broken convention is its own failure.
+check "bad: help on stderr, exit 1" 1 "$(status help-long fail)" -- "$fx/bad"
+check "bad: help detail names all three" 1 \
+  '.checks[0].detail | test("exit 1") and test("nothing on stdout") and test("on stderr")' -- "$fx/bad"
+check "bad: --version without a number" 1 \
+  '.checks[] | select(.id == "version") | .status == "fail" and (.detail | test("no version number"))' -- "$fx/bad"
+check "bad: unknown flag ignored" 1 \
+  '.checks[] | select(.id == "unknown-flag") | .detail | test("exit 0 on an unknown flag")' -- "$fx/bad"
+check "bad: colour into a pipe" 1 "$(status no-color-piped fail)" -- "$fx/bad"
+check "bad: colour despite NO_COLOR" 1 "$(status no-color-env fail)" -- "$fx/bad"
+check "bad: no help to measure" 1 "$(status help-width skip)" -- "$fx/bad"
+check "bad: nothing to time" 1 "$(status startup skip)" -- "$fx/bad"
+
+# A caller's colour forcing never reaches the tool.
+FORCE_COLOR=1 CLICOLOR_FORCE=1 check "good: FORCE_COLOR stripped" 0 "$(status no-color-piped pass)" -- "$fx/good"
+
+# Skips are reported, not dropped.
+check "skip is recorded" 0 \
+  '[.checks[] | select(.status == "skip") | .id] == ["unknown-flag"]' --skip unknown-flag -- "$fx/good"
+
+# A hang is a failure within the timeout, and its children die with it.
+start=$(date +%s)
+check "hang: --help times out" 1 \
+  '.checks[0] | .status == "fail" and (.detail | test("timed out")) and .run.timedOut' \
+  --timeout 1 --skip no-color-env -- "$fx/hang"
+if [ $(( $(date +%s) - start )) -gt 15 ]; then
+  echo "FAIL hang: the probe waited on the hung tool's child"; fail=$((fail + 1))
+else
+  pass=$((pass + 1))
+fi
+
+# Arguments before the flag select a subcommand.
+check "sub: probes the subcommand" 0 '.summary == {pass: 8}' -- "$fx/sub" wt
+check "sub: argv has the subcommand" 0 '.checks[0].run.argv[1:] == ["wt", "--help"]' -- "$fx/sub" wt
+
+# --json-output runs the argv once and judges stdout.
+check "json: one document" 0 "$(status json-valid pass)" --json-output -- "$fx/good" --json
+check "json: two documents" 1 \
+  '.checks[0].detail | test("2 JSON documents")' --json-output -- "$fx/bad" --json
+check "json: not JSON" 1 \
+  '.checks[0].detail | test("not JSON")' --json-output -- "$fx/hang" --json
+check "json: empty stdout" 1 \
+  '.checks[0].detail | test("nothing on stdout")' --json-output -- "$fx/good" --bogus
+
+# The working directory is empty and temporary unless the caller names one.
+check "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"
+check "cwd: given one is used" 0 ".cwd == \"$tmp\"" --cwd "$tmp" -- "$fx/good"
+
+# Could not probe: exit 2 with an error, never a check list.
+check "missing command" 2 '.error | test("command not found")' -- no-such-command-zz
+check "not executable" 2 '.error | test("not an executable")' -- "$fx/../run.nope"
+
+# Bad usage: exit 64.
+for args in "" "--timeout" "--timeout 0 -- ls" "--timeout x -- ls" "--frob -- ls"; do
+  got=0
+  # shellcheck disable=SC2086
+  "$probe" $args > /dev/null 2>&1 || got=$?
+  if [ "$got" = 64 ]; then pass=$((pass + 1)); else echo "FAIL usage '$args': exit $got"; fail=$((fail + 1)); fi
+done
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]

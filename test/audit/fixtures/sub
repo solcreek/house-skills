@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# A subcommand tool: probing `sub wt` must pass `wt` before the flag.
+[ "${1:-}" = wt ] || { echo "sub: give a subcommand" >&2; exit 2; }
+case "${2:-}" in
+  -h|--help) echo "usage: sub wt" ;;
+  --version) echo "sub 0.1.0" ;;
+  *) echo "sub wt: unknown flag ${2:-}" >&2; exit 2 ;;
+esac

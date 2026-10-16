@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# A tool that follows every convention the probe checks.
+case "${1:-}" in
+  -h|--help) echo "usage: good [--json]"; echo; echo "Example: good --json" ;;
+  --version) echo "good 1.2.3" ;;
+  --json) echo '{"ok": true}' ;;
+  -*) echo "good: unknown flag $1 (see good --help)" >&2; exit 2 ;;
+  *) echo "did the thing" ;;
+esac

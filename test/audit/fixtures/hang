@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Waits forever on --help (as a tool behind a pager or a prompt would);
+# its child must die with it, or the probe's caller waits on the pipe.
+case "${1:-}" in
+  --help) sleep 300 & wait ;;
+  --json) echo 'not json' ;;
+  *) echo "usage: hang" >&2; exit 2 ;;
+esac
