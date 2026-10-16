@@ -85,8 +85,12 @@ files, caches, git state, remote services. In `describe` it has
   cache under `$XDG_CACHE_HOME/NAME` (`~/.cache/NAME`), and other state
   under `$XDG_STATE_HOME/NAME` (`~/.local/state/NAME`).
 - `NAME_HOME` (upper case, `-` becoming `_`), when set, replaces all three
-  roots with one directory. Tests and audits point it at a temporary
-  directory, so they never touch the user's real state.
+  with `$NAME_HOME/config`, `$NAME_HOME/cache` and `$NAME_HOME/state`. Tests
+  and audits point it at a temporary directory, so they never touch the
+  user's real files.
+- **Cache or state?** A cache is safe to delete: the tool rebuilds it, and
+  nothing is lost. Anything whose loss loses information (what the user
+  saved, marked or dismissed) is state, whatever the request calls it.
 
 ## Agent context
 

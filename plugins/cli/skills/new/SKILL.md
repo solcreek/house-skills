@@ -102,7 +102,10 @@ commands, then delete them. Keep:
   each command add a test that it rejects an unknown flag and extra
   arguments, and that `--json` output is a single document. For each
   mutating command, test that it neither acts nor prompts without `--yes`,
-  that `--dry-run` changes nothing, and that a rerun succeeds.
+  that `--dry-run` changes nothing, and that a rerun succeeds. Give a
+  mutating command `--dry-run` in its other tests (extra arguments, unknown
+  flags): without it, the missing-flag check answers first and the test
+  passes for the wrong reason.
 
 ## 5. Verify
 
@@ -113,8 +116,13 @@ every command:
     $A/probe -- BINARY COMMAND                 # add --skip unknown-command when
                                                # COMMAND takes a free positional
     $A/run-json -- BINARY describe
-    $A/run-json --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
+    $A/run-json --expect-exit 0 --cwd FIXTURE --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
     $A/run-json --expect-exit 2 -- BINARY MUTATING … --json   # no --yes: refused, as JSON
+
+Give every `run-json` call an `--expect-exit`: without it, a failure that
+prints a well-formed error passes. Point commands that read files at a
+fixture with some content (`--cwd`, or an absolute path): in the default
+empty directory they find nothing and pass trivially.
 
 `run-json` runs the command, so it asks for approval: run it only on
 read-only commands, and on mutating ones only with `--dry-run`. Add
