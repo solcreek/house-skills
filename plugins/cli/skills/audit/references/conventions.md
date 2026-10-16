@@ -40,7 +40,10 @@ files, caches, git state, remote services. In `describe` it has
   usage error (exit 2) that names both flags. It never prompts, with or
   without a terminal. An agent always passes one, and a person learns to.
 - `--dry-run` prints the same output as `--yes` would, with
-  `"dryRun": true`, and touches nothing.
+  `"dryRun": true`, and touches nothing the user owns. A cache the runtime
+  keeps for itself (Node's compiled code under `home("cache")`) is not a
+  change: any command may write it, `--help` and `--dry-run` included,
+  since deleting it loses nothing.
 - Running it again after it succeeded is a success with `"changed": false`,
   never an error (rubric S5).
 

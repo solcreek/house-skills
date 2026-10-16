@@ -26,8 +26,10 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
 - **Exit 3**: return `partialError{…}` after printing the result; `main`
   exits 3 without printing anything more. Exit codes are appended to every
   help page through the root's help template.
-- **Integer flags** use `Uint`/`Int`; `describe` reports their type as
-  `integer`.
+- **Integer flags** use `wholeNumber` (`flags.Var(&n, "limit", "… \`N\` …")`),
+  never pflag's `Uint`/`Int`, which read `010` as octal and take `0x3` and
+  `1_0`. Its `Type()` is `uint`, so `describe` reports `integer`; the
+  backquoted `N` is the placeholder in help.
 - **Help on stdout**: `main` calls `root.SetOut(os.Stdout)`. Write command
   output with `cmd.OutOrStdout()` so tests can capture it.
 - **`--json` is a persistent flag** on the root, so every command has it.
