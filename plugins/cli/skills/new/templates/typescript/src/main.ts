@@ -211,8 +211,9 @@ const commands: Command[] = [
         }
       };
       walk(root);
-      // Ties by byte order, as Rust and Go sort, never by locale.
-      found.sort((a, b) => b.bytes - a.bytes || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      // Ties by UTF-8 byte order, as Rust and Go sort: never by locale, and not
+      // by JavaScript's UTF-16 comparison, which orders 😀 before Ａ.
+      found.sort((a, b) => b.bytes - a.bytes || Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
       const list = capped(found, Number(values.limit));
       emit(values, { root, ...list, ...(problems.length ? { problems } : {}) }, () =>
         list.items.map((f) => `${f.bytes}\t${printable(f.path)}`).join("\n"),

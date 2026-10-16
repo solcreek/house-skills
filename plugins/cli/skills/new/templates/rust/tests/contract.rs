@@ -131,19 +131,21 @@ fn a_missing_input_fails_naming_it_and_an_unreadable_part_is_partial() {
 #[test]
 fn ties_sort_by_bytes_a_symlinked_dir_lists_and_the_home_is_skipped() {
     let d = sandbox();
-    for n in ["b2", "B1", "a", "é", "Z"] {
+    for n in ["b2", "B1", "a", "é", "Z", "😀", "Ａ"] {
         std::fs::write(d.path().join(n), "x").unwrap();
     }
     let v = json(&cli(d.path()).args(["files", "--json"]).output().unwrap().stdout);
     let paths: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["path"].as_str().unwrap()).collect();
-    assert_eq!(paths, ["B1", "Z", "a", "b2", "é"]);
+    assert_eq!(paths, ["B1", "Z", "a", "b2", "é", "Ａ", "😀"]);
     let parent = sandbox();
     std::os::unix::fs::symlink(d.path(), parent.path().join("link")).unwrap();
     let v = json(&cli(parent.path()).args(["files", "link", "--json"]).output().unwrap().stdout);
-    assert_eq!(v["total"], 5);
-    let home = d.path().join(".home");
-    cli_in(d.path(), &home).args(["touch", "made", "--yes"]).assert().success();
-    assert!(home.join("state/history.jsonl").exists());
+    assert_eq!(v["total"], 7);
+    // A relative TOOL_HOME, with a file directly under it, is skipped whole.
+    let home = Path::new(".home");
+    cli_in(d.path(), home).args(["touch", "made", "--yes"]).assert().success();
+    assert!(d.path().join(".home/state/history.jsonl").exists());
+    std::fs::write(d.path().join(".home/extra"), "x").unwrap();
     let v = json(&cli_in(d.path(), &home).args(["files", "--json"]).output().unwrap().stdout);
     assert!(v["items"].as_array().unwrap().iter().all(|i| !i["path"].as_str().unwrap().starts_with(".home")));
 }

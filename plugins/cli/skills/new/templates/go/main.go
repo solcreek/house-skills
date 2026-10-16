@@ -362,6 +362,11 @@ func homes() map[string]bool {
 		if d == "" {
 			continue
 		}
+		// Absolute first: a relative TOOL_HOME would never equal the absolute
+		// paths WalkDir gives.
+		if abs, err := filepath.Abs(d); err == nil {
+			d = abs
+		}
 		if real, err := filepath.EvalSymlinks(d); err == nil {
 			own[real] = true
 		}

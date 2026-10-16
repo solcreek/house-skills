@@ -155,16 +155,17 @@ describe("contract", { concurrency: true }, () => {
   test("ties sort by byte order; a symlinked DIR is listed; the tool's home is skipped", async () => {
     const cwd = sandbox();
     // Distinct even on a case-insensitive file system.
-    for (const n of ["b2", "B1", "a", "é", "Z"]) writeFileSync(join(cwd, n), "x");
+    for (const n of ["b2", "B1", "a", "é", "Z", "😀", "Ａ"]) writeFileSync(join(cwd, n), "x");
     const sorted = json(await run(["files", "--json"], { cwd })).items.map((f: { path: string }) => f.path);
-    assert.deepEqual(sorted, ["B1", "Z", "a", "b2", "é"]);
+    assert.deepEqual(sorted, ["B1", "Z", "a", "b2", "é", "Ａ", "😀"]);
     const parent = sandbox();
     symlinkSync(cwd, join(parent, "link"));
-    assert.equal(json(await run(["files", "link", "--json"], { cwd: parent })).total, 5);
-    const home = join(cwd, ".home");
-    await run(["touch", "made", "--yes"], { cwd, env: { TOOL_HOME: home } });
-    assert.ok(existsSync(join(home, "state", "history.jsonl")));
-    const listed = json(await run(["files", "--json"], { cwd, env: { TOOL_HOME: home } })).items;
+    assert.equal(json(await run(["files", "link", "--json"], { cwd: parent })).total, 7);
+    // A relative TOOL_HOME, with a file directly under it, is skipped whole.
+    await run(["touch", "made", "--yes"], { cwd, env: { TOOL_HOME: ".home" } });
+    assert.ok(existsSync(join(cwd, ".home", "state", "history.jsonl")));
+    writeFileSync(join(cwd, ".home", "extra"), "x");
+    const listed = json(await run(["files", "--json"], { cwd, env: { TOOL_HOME: ".home" } })).items;
     assert.deepEqual(listed.filter((f: { path: string }) => f.path.startsWith(".home")), []);
   });
 

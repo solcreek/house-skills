@@ -201,26 +201,28 @@ func TestMissingInputAndPartial(t *testing.T) {
 func TestTiesSymlinkedDirAndHome(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	for _, n := range []string{"b2", "B1", "a", "é", "Z"} {
+	for _, n := range []string{"b2", "B1", "a", "é", "Z", "😀", "Ａ"} {
 		must(t, os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644))
 	}
 	var paths []string
 	for _, it := range decode(t, run(t, dir, "files", "--json").out)["items"].([]any) {
 		paths = append(paths, it.(map[string]any)["path"].(string))
 	}
-	if !slices.Equal(paths, []string{"B1", "Z", "a", "b2", "é"}) {
+	if !slices.Equal(paths, []string{"B1", "Z", "a", "b2", "é", "Ａ", "😀"}) {
 		t.Errorf("order: %v", paths)
 	}
 	parent := t.TempDir()
 	must(t, os.Symlink(dir, filepath.Join(parent, "link")))
-	if v := decode(t, run(t, parent, "files", "link", "--json").out); v["total"] != 5.0 {
+	if v := decode(t, run(t, parent, "files", "link", "--json").out); v["total"] != 7.0 {
 		t.Errorf("symlinked DIR: %v", v["total"])
 	}
-	home := filepath.Join(dir, ".home")
+	// A relative TOOL_HOME, with a file directly under it, is skipped whole.
+	home := ".home"
 	runIn(t, dir, home, "touch", "made", "--yes")
-	if !exists(filepath.Join(home, "state", "history.jsonl")) {
+	if !exists(filepath.Join(dir, home, "state", "history.jsonl")) {
 		t.Fatal("no history")
 	}
+	must(t, os.WriteFile(filepath.Join(dir, home, "extra"), []byte("x"), 0o644))
 	for _, it := range decode(t, runIn(t, dir, home, "files", "--json").out)["items"].([]any) {
 		if p := it.(map[string]any)["path"].(string); strings.HasPrefix(p, ".home") {
 			t.Errorf("listed the tool's home: %s", p)
