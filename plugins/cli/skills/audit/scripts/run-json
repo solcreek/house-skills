@@ -1,33 +1,41 @@
 #!/usr/bin/env bash
 # Run one command and check its machine-readable output. Prints JSON.
 #
-#   run-json [--lines] [--timeout SECS] [--cwd DIR] [--offline] [--brief]
-#            -- CMD [ARGS...]
+#   run-json [--lines] [--expect-exit N] [--timeout SECS] [--cwd DIR]
+#            [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]
 #
 # Runs exactly CMD ARGS once. This runs an action, so the caller must know
 # it is safe (read-only and local), or have the user's yes. Checks:
 #   json-valid      stdout is one JSON document, or with --lines (for a
 #                   command documented as NDJSON) one JSON value per line
+#   json-error      on a non-zero exit, the document has an "error" string
+#                   (rubric A5); skipped on exit 0
+#   exit            with --expect-exit N, the exit code is N
 #   no-color-piped  no escape codes on stdout or stderr
-# --offline and --brief as in probe. Same isolation as probe: stdin at EOF, an empty temporary directory unless
+# --env, --offline and --brief as in probe. Same isolation as probe: stdin at EOF, an empty temporary directory unless
 # --cwd, no colour forcing, a timeout that kills the process group.
 #
 # Exit: 0 both passed, 1 one failed, 2 could not run (command not found or
 # not executable, jq/perl missing), 64 bad usage.
 set -euo pipefail
 
-usage() { echo "usage: run-json [--lines] [--timeout SECS] [--cwd DIR] [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
+usage() { echo "usage: run-json [--lines] [--expect-exit N] [--timeout SECS] [--cwd DIR] [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
 
+. "$(dirname "$0")/lib.sh"
 timeout=10
 lines=
 cwd=
 offline=
 brief=
+expect=
+runenv=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --timeout) [ $# -ge 2 ] || usage; timeout=$2; shift 2 ;;
     --cwd) [ $# -ge 2 ] || usage; cwd=$2; shift 2 ;;
     --lines) lines=1; shift ;;
+    --env) [ $# -ge 2 ] || usage; envarg "$2"; shift 2 ;;
+    --expect-exit) [ $# -ge 2 ] || usage; case "$2" in ''|*[!0-9]*) usage ;; esac; expect=$2; shift 2 ;;
     --offline) offline=1; shift ;;
     --brief) brief=1; shift ;;
     --) shift; break ;;
@@ -40,7 +48,6 @@ case "$timeout" in ''|*[!0-9]*) usage ;; esac
 
 command -v jq > /dev/null || { echo '{"error":"jq not found"}'; exit 2; }
 command -v perl > /dev/null || { echo '{"error":"perl not found"}'; exit 2; }
-. "$(dirname "$0")/lib.sh"
 cmd=$(resolve "$1") || { echo "$cmd"; exit 2; }
 shift
 base=("$cmd" "$@")
@@ -69,6 +76,17 @@ elif docs=$(jq -s length < "$tmp/json.out" 2> /dev/null); then
   else record json-valid fail "$docs JSON documents on stdout, expected one (exit $exit; pass --lines if it is NDJSON)" "$r"; fi
 else
   record json-valid fail "stdout is not JSON (exit $exit)" "$r"
+fi
+if [ "$exit" = 0 ]; then
+  record json-error skip "exit 0"
+elif jq -se 'length == 1 and (.[0] | type == "object") and (.[0].error | type == "string" and length > 0)' "$tmp/json.out" > /dev/null 2>&1; then
+  record json-error pass "exit $exit with an error string"
+else
+  record json-error fail "exit $exit without a non-empty {\"error\": \"...\"} on stdout"
+fi
+if [ -n "$expect" ]; then
+  if [ "$exit" = "$expect" ]; then record exit pass "exit $exit"
+  else record exit fail "exit $exit, expected $expect"; fi
 fi
 if has_ansi json; then record no-color-piped fail "escape codes in output written to a pipe"
 else record no-color-piped pass "no escape codes"; fi

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Black-box probe of a command-line tool's conventions. Prints JSON.
 #
-#   probe [--timeout SECS] [--skip ID]... [--cwd DIR] [--offline] [--brief]
-#         -- CMD [ARGS...]
+#   probe [--timeout SECS] [--skip ID]... [--cwd DIR] [--env K=V]...
+#         [--offline] [--brief] -- CMD [ARGS...]
 #
 # Runs CMD ARGS with --help, -h, --version, one unknown flag and one unknown
 # subcommand, plus --help twice under a terminal (script(1)), and checks
@@ -23,6 +23,7 @@
 # usage-message no-color-piped no-color-env help-width startup.
 # `--skip help` skips every check that runs --help or -h (help-long,
 # help-short, no-color-env, help-width, startup).
+# --env sets a variable for every run (point a tool's state at a temp dir).
 # --offline points proxies nowhere and stops git transports (best effort).
 # --brief cuts each run to exit, ms and the first line of stderr.
 #
@@ -30,13 +31,15 @@
 # (command not found or not executable, jq/perl missing), 64 bad usage.
 set -euo pipefail
 
-usage() { echo "usage: probe [--timeout SECS] [--skip ID]... [--cwd DIR] [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
+usage() { echo "usage: probe [--timeout SECS] [--skip ID]... [--cwd DIR] [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
 
+. "$(dirname "$0")/lib.sh"
 timeout=10
 skip=" "
 cwd=
 offline=
 brief=
+runenv=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --timeout) [ $# -ge 2 ] || usage; timeout=$2; shift 2 ;;
@@ -46,6 +49,7 @@ while [ $# -gt 0 ]; do
         *) skip="$skip$2 " ;;
       esac
       shift 2 ;;
+    --env) [ $# -ge 2 ] || usage; envarg "$2"; shift 2 ;;
     --offline) offline=1; shift ;;
     --brief) brief=1; shift ;;
     --cwd) [ $# -ge 2 ] || usage; cwd=$2; shift 2 ;;
@@ -59,7 +63,6 @@ case "$timeout" in ''|*[!0-9]*) usage ;; esac
 
 command -v jq > /dev/null || { echo '{"error":"jq not found"}'; exit 2; }
 command -v perl > /dev/null || { echo '{"error":"perl not found"}'; exit 2; }
-. "$(dirname "$0")/lib.sh"
 cmd=$(resolve "$1") || { echo "$cmd"; exit 2; }
 shift
 base=("$cmd" "$@")

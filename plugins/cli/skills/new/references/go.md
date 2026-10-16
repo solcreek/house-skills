@@ -16,6 +16,9 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
 
 ## Other notes
 
+- **Mutating commands**: `mutating(cmd)` adds `--dry-run` and `--yes` and
+  marks it for `describe`. The command's `RunE` calls `change(cmd)` first,
+  which returns a usage error unless exactly one is set.
 - **Help on stdout**: `main` calls `root.SetOut(os.Stdout)`. Write command
   output with `cmd.OutOrStdout()` so tests can capture it.
 - **`--json` is a persistent flag** on the root, so every command has it.

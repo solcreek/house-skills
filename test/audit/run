@@ -13,6 +13,12 @@ fail=0
 # Colour forcing from the caller (CI often sets it) must not change results;
 # cases that test it set it themselves.
 unset FORCE_COLOR CLICOLOR_FORCE NO_COLOR
+# The fixtures by bare name, for the --env PATH test.
+# Its shebang is absolute, so it still runs when a case sets PATH.
+mkdir "$tmp/onpath"
+printf '#!/bin/sh\necho "{\\"path\\": \\"$PATH\\"}"\n' > "$tmp/onpath/good-on-path"
+chmod +x "$tmp/onpath/good-on-path"
+export PATH="$tmp/onpath:$PATH"
 
 # check NAME SCRIPT WANT_EXIT JQ_EXPR ARGS... : runs the script, asserts its
 # exit code and that JQ_EXPR is true of its output.
@@ -115,6 +121,20 @@ runjson "json: NDJSON with --lines" 0 "$(is json-valid pass)" --lines -- "$fx/go
 runjson "json: NDJSON without --lines" 1 "$(says json-valid 'pass --lines')" -- "$fx/good" --lines
 runjson "json: --lines catches a bad line" 1 "$(says json-valid '1 of 1 lines')" --lines -- "$fx/hang" --json
 
+runjson "json-error: failure without an error" 1 "$(says json-error 'without')" -- "$fx/good" --fail-bare
+runjson "json-error: failure with an error" 0 "$(is json-error pass)" -- "$fx/good" --fail-json
+runjson "json-error: skipped on success" 0 "$(is json-error skip)" -- "$fx/good" --json
+runjson "--expect-exit: match" 0 "$(is exit pass)" --expect-exit 1 -- "$fx/good" --fail-json
+runjson "--expect-exit: mismatch" 1 "$(says exit 'expected 0')" --expect-exit 0 -- "$fx/good" --fail-json
+runjson "--env reaches the tool" 0 \
+  '.checks[0].run.stdout | fromjson | .proxy == "http://x:1"' --env HTTPS_PROXY=http://x:1 -- "$fx/good" --env
+probe "--env on probe reaches the tool" 1 "$(says help-long 'ignored|neither|exit')" --env GOOD_BREAK_HELP=1 -- "$fx/good"
+runjson "--offline wins over --env" 0 \
+  '.checks[0].run.stdout | fromjson | .proxy == "http://127.0.0.1:9"' --env HTTPS_PROXY=http://real:3128 --offline -- "$fx/good" --env
+runjson "--env PATH= does not hide perl or the tool" 0 \
+  "$(is json-valid pass) and (.checks[0].run.stdout | fromjson | .path == \"/nonexistent\")" --env PATH=/nonexistent -- good-on-path
+runjson "json-error: an empty error fails" 1 "$(says json-error 'non-empty')" -- "$fx/good" --fail-empty
+
 # The working directory is empty and temporary unless the caller names one.
 probe "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"
 probe "cwd: given one is used" 0 ".cwd == \"$tmp\"" --cwd "$tmp" -- "$fx/good"
@@ -133,7 +153,8 @@ for s in probe run-json; do
     if [ "$got" = 64 ]; then pass=$((pass + 1)); else echo "FAIL $s usage '$args': exit $got"; fail=$((fail + 1)); fi
   done
 done
-for c in "probe --lines -- ls" "run-json --skip x -- ls"; do
+for c in "probe --lines -- ls" "run-json --skip x -- ls" "probe --env NOEQUALS -- ls" "run-json --expect-exit x -- ls" \
+  "run-json --env A-B=1 -- ls" "run-json --env 1A=1 -- ls" "run-json --env =1 -- ls"; do
   got=0
   # shellcheck disable=SC2086
   "$scripts/"$c > /dev/null 2>&1 || got=$?

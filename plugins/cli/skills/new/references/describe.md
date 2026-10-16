@@ -10,13 +10,14 @@ when you add commands; add fields, never rename them.
   "version": "0.1.0",
   "summary": "one line on what it is for",
   "exitCodes": { "ok": 0, "failed": 1, "usage": 2 },
-  "flags": [{ "name": "help", "short": "h", "takesValue": false, "description": "…" }],
+  "flags": [{ "name": "help", "short": "h", "takesValue": false, "default": null, "description": "…" }],
   "commands": [
     {
       "name": "greet",
       "summary": "print a greeting",
-      "usage": "tool greet NAME [--json]",
-      "flags": [{ "name": "json", "short": null, "takesValue": false, "description": "…" }],
+      "usage": "tool greet NAME [options]",
+      "mutates": false,
+      "flags": [{ "name": "json", "short": null, "takesValue": false, "default": null, "description": "…" }],
       "commands": []
     }
   ]
@@ -26,7 +27,8 @@ when you add commands; add fields, never rename them.
 - `version` and `exitCodes` appear at the top level only.
 - A command's `flags` include the ones it inherits (`--json`, `--help`): what
   its `--help` shows.
-- Optional per command: `mutates` (true: takes `--yes` and `--dry-run`),
-  `examples`. The TypeScript template has both; in Rust and Go, add them when
-  a command mutates.
+- `mutates` is on every command: true means it takes `--dry-run` and `--yes`
+  and refuses to run without exactly one (conventions).
+- `default` is the default of a flag that takes a value, else null.
+- Optional per command: `examples` (the TypeScript template has them).
 - `test/new/run` checks this shape for every template.

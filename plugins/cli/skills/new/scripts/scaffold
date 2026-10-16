@@ -59,8 +59,10 @@ dir="$(cd "$dir" && pwd)"
 log=$(mktemp)
 
 cp -R "$templates/$stack/." "$dir/"
-# The placeholder is the whole word `tool`; the templates use it for nothing else.
-find "$dir" -type f -exec perl -pi -e "s/\\btool\\b/$name/g" {} +
+# The placeholder is the whole word `tool` (and TOOL in TOOL_HOME); the
+# templates use it for nothing else.
+upper=$(echo "$name" | tr 'a-z-' 'A-Z_')
+find "$dir" -type f -exec perl -pi -e "s/\\btool\\b/$name/g; s/\\bTOOL_HOME\\b/${upper}_HOME/g" {} +
 
 cd "$dir"
 case "$stack" in
@@ -76,7 +78,7 @@ case "$stack" in
     {
       cargo add -q clap --features derive &&
       cargo add -q serde_json anyhow &&
-      cargo add -q --dev assert_cmd predicates
+      cargo add -q --dev assert_cmd predicates tempfile
     } >> "$log" 2>&1 || failed "cargo add"
     bin="$dir/target/debug/$name"
     build="cargo build"

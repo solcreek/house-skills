@@ -10,9 +10,10 @@ allowed-tools:
 # New CLI
 
 Build a tool that passes [the rubric](../audit/references/rubric.md) on its
-first commit. The templates already pass: every **must** rule, plus `--json`,
-`describe` and a short usage error. Your job is to keep them passing while
-you replace the example command with the real ones.
+first commit and follows [the conventions](../audit/references/conventions.md)
+our tools share: exit codes, flag names, JSON shapes, paths, state. The
+templates already do both. Your job is to keep it so while you replace the
+example commands with the real ones.
 
 `$S` is `${CLAUDE_SKILL_DIR}/scripts`. `$A` is
 `${CLAUDE_SKILL_DIR}/../audit/scripts`.
@@ -35,7 +36,13 @@ Ask only if the repository and the request leave it open. Read
 
 ## 2. Design the surface before the code
 
-Write the help first, as plain text in your reply or in a design note: every
+First list what the request leaves open about **behaviour**: what a command
+reads and writes, what counts as done, where state lives, what happens on a
+rerun. Ask the user those questions together, in one message. If you cannot
+ask, pick the default the conventions suggest and list each choice under
+"decisions to confirm" in your report.
+
+Then write the help, as plain text in your reply or in a design note: every
 command with its usage line, flags, one example, whether it **mutates**, and
 the exit codes beyond 0/1/2. Check the design against the rubric now, when a
 change is cheap:
@@ -44,11 +51,14 @@ change is cheap:
   thing everywhere (D4).
 - Every command that reports something has `--json`. Decide its fields now,
   and treat them as an API from then on (A1).
-- Every mutating command takes `--yes` and `--dry-run`, and never prompts
-  without a TTY (S3).
-- Lists have a cap and a total (A6). "Could not look" has its own exit code
-  or state, distinct from "found nothing" (A7).
-- An argument that becomes a path, URL or query is validated (A9).
+- Every command that changes anything besides its output is **mutating**:
+  it requires `--dry-run` or `--yes`, and never prompts (S3, conventions).
+- Lists use `--limit` and the `items`/`total`/`shown`/`truncated` shape
+  (A6). A partial result exits 3 with `problems` (A7).
+- State lives under XDG paths and moves wholesale with `NAME_HOME`, which the
+  tests set (C2, conventions).
+- An argument that becomes a path, URL or query is validated (A9). Output
+  paths stay inside the root the command writes to.
 - Secrets come from env or stdin, never from a flag (S4).
 - A tool wrapping an API also takes the whole request as JSON (A11).
 
@@ -58,7 +68,8 @@ change is cheap:
 
 This copies the template, renames the placeholder to NAME, and adds the
 latest dependencies. It prints JSON with `dir`, `files`, `build` and `test`
-(run both in `dir`), and `binary`, the absolute path to probe. Exit 2 means
+(run both in `dir`; `build` is null for TypeScript, which runs from source),
+and `binary`, the absolute path to probe. Exit 2 means
 it could not start (`error` says why: a missing toolchain, DIR not empty, a
 name cargo reserves); exit 1 means a step failed (`log` has the tail, and a
 DIR it created is gone, so you can rerun it).
@@ -69,19 +80,29 @@ runner. Keep the contract tests.
 
 ## 4. Replace the example
 
-The template has one command, `greet`. Replace it with the commands from
-step 2, keeping:
+The template has two example commands: `greet`, which only reports, and
+`touch`, which mutates and writes a path. Use them as the patterns for your
+commands, then delete them. Keep:
 
-- the **help check before `run`** (TypeScript) and the usage-error mapping
-  (Go). Neither is something the library does for you;
+- the **help check before `run`**, the positional-count check and the
+  `--dry-run`/`--yes` check in TypeScript's `main`, and the usage-error
+  mapping in Go. The libraries do none of these for you;
+- the mutating pattern: `mutates: true` (TypeScript), flattening `Change`
+  (Rust), or `mutating(cmd)` plus `change(cmd)` (Go);
+- the path check (`inside`) for any path the tool writes, and creating
+  with create-only-if-absent; to overwrite an existing file, write a temp
+  file beside it and rename over it, never open the path for writing;
 - `describe`, generated from the same definitions as help, in the shape of
   [references/describe.md](references/describe.md) shared by all three
   templates;
 - the exit-code table, documented in the top-level help. Add new codes to it,
   and never reuse one;
-- the contract tests, extended. For each command add a test that it rejects
-  an unknown flag, and that `--json` output is a single document; for each
-  mutating command, that it neither acts nor prompts without `--yes`.
+- the contract tests, extended: they run each case in a fresh directory
+  with `TOOL_HOME` (renamed for your tool) pointing at a temporary one. For
+  each command add a test that it rejects an unknown flag and extra
+  arguments, and that `--json` output is a single document. For each
+  mutating command, test that it neither acts nor prompts without `--yes`,
+  that `--dry-run` changes nothing, and that a rerun succeeds.
 
 ## 5. Verify
 
@@ -92,10 +113,12 @@ every command:
     $A/probe -- BINARY COMMAND                 # add --skip unknown-command when
                                                # COMMAND takes a free positional
     $A/run-json -- BINARY describe
-    $A/run-json -- BINARY COMMAND … --json     # read-only commands; --lines for NDJSON
+    $A/run-json --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
+    $A/run-json --expect-exit 2 -- BINARY MUTATING … --json   # no --yes: refused, as JSON
 
 `run-json` runs the command, so it asks for approval: run it only on
-commands that are read-only and local.
+read-only commands, and on mutating ones only with `--dry-run`. Add
+`--lines` for NDJSON.
 
 Every check must pass. Fix the code, not the check. The expected skips are:
 `version` on a subcommand, `unknown-command` where a command takes a free
@@ -105,11 +128,12 @@ needs a reason in your report.
 ## 6. Ship the agent context
 
 Rubric A12: agents learn a tool from what is in their context, not from
-`--help`. Add a short section to the repository's `AGENTS.md`, or a skill if
-the tool is used across repositories. The section names the commands that
-mutate, says to run `--dry-run` before them and to pass `--json`, and lists
-what each exit code means. Point it at `describe` for everything else rather
-than copying the flags, which would drift.
+`--help`. Fill in the "Agent context" section from the conventions and put
+it in the repository's `AGENTS.md`, or in the tool's own `AGENTS.md` when it
+is not part of a repository, or in a skill when it is used across
+repositories. It names the commands that mutate, the exit codes, and the
+fields that carry other people's text, and it points at `describe` for
+everything else rather than copying the flags, which would drift.
 
 Report: the files created, the test and probe results (each `summary`), and
 the design decisions from step 2 that the user should confirm.

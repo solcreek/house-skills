@@ -11,7 +11,8 @@ allowed-tools:
 Hold a command-line tool to [the rubric](references/rubric.md). Every rule
 there has an id, a tier (must / should / taste) and how it is checked. Read
 it before step 3. A finding is a rubric id with evidence, never an
-impression.
+impression. For our own tools, also check [the conventions](references/conventions.md)
+(exit codes, flag names, JSON shapes); a departure no rule covers is **taste**.
 
 `$S` below is `${CLAUDE_SKILL_DIR}/scripts`.
 
@@ -30,7 +31,9 @@ means:
 
 When unsure, ask. Pass `--offline` to every probe and `run-json` call as a
 second line of defence: it points proxies nowhere and stops git transports.
-It is best effort, not a sandbox.
+It is best effort, not a sandbox. When the tool keeps state, point it at a
+temporary directory with `--env` (`--env NAME_HOME=…`, or its XDG
+variables), so a probe never touches the user's real state.
 
 ## 1. Find the tool and its commands
 
@@ -76,7 +79,9 @@ finding: cite `file:line`. Then skip what would trigger it:
     $S/run-json --offline -- TOOL SUB … --json          # read-only commands only
 
 `run-json` runs an action, so the user is asked to approve it each time.
-Add `--lines` for a command documented to print NDJSON.
+Add `--lines` for a command documented to print NDJSON. On a non-zero exit
+it checks the document carries an `error` string (A5); `--expect-exit N`
+asserts the exit code, for checking a failure on purpose.
 
 Each call prints JSON. `checks[]` has `id`, `status` (pass / fail / skip),
 `detail` and `run` (argv, exit, ms, timedOut, and stdout/stderr excerpts cut
