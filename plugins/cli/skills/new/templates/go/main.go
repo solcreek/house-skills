@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -66,22 +67,37 @@ func newRoot() *cobra.Command {
 	return root
 }
 
-// describe is the same definitions as --help, as data (rubric A10).
+// describe is the same definitions as --help, as data (rubric A10), in the
+// shape every template's describe prints: see references/describe.md.
 func describe(c *cobra.Command) map[string]any {
-	var flags []map[string]any
-	c.Flags().VisitAll(func(f *pflag.Flag) {
+	// cobra adds --help and --version only when a command runs; add them now
+	// so describe lists what --help shows.
+	c.InitDefaultHelpFlag()
+	if !c.HasParent() {
+		c.InitDefaultVersionFlag()
+	}
+	flags := []map[string]any{}
+	add := func(f *pflag.Flag) {
+		if f.Hidden {
+			return
+		}
+		var short any
+		if f.Shorthand != "" {
+			short = f.Shorthand
+		}
 		flags = append(flags, map[string]any{
-			"name": f.Name, "short": f.Shorthand, "type": f.Value.Type(),
-			"default": f.DefValue, "usage": f.Usage,
+			"name": f.Name, "short": short, "takesValue": f.Value.Type() != "bool", "description": f.Usage,
 		})
-	})
-	var subs []map[string]any
+	}
+	c.LocalFlags().VisitAll(add)
+	c.InheritedFlags().VisitAll(add)
+	subs := []map[string]any{}
 	for _, s := range c.Commands() {
 		if s.IsAvailableCommand() && s.Name() != "completion" {
 			subs = append(subs, describe(s))
 		}
 	}
-	d := map[string]any{"name": c.Name(), "use": c.Use, "short": c.Short, "flags": flags, "commands": subs}
+	d := map[string]any{"name": c.Name(), "summary": c.Short, "usage": c.UseLine(), "flags": flags, "commands": subs}
 	if !c.HasParent() {
 		d["version"] = version
 		d["exitCodes"] = map[string]int{"ok": exitOK, "failed": exitFailed, "usage": exitUsage}
@@ -119,7 +135,9 @@ func main() {
 	if usage {
 		fmt.Fprintln(os.Stderr, "Run 'tool --help' for usage.")
 	}
-	if asJSON { // under --json a failure is JSON too (rubric A5)
+	// Under --json a failure is JSON too (rubric A5). Parsing may have
+	// stopped before it saw --json, so look at the arguments themselves.
+	if asJSON || slices.Contains(os.Args[1:], "--json") {
 		_ = printJSON(map[string]any{"error": err.Error(), "usage": usage})
 	}
 	if usage {

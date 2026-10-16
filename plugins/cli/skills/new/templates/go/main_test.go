@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -41,6 +42,16 @@ func TestHelpGoesToStdout(t *testing.T) {
 	}
 }
 
+func TestJSONFailureWhateverTheOrder(t *testing.T) {
+	for _, args := range [][]string{{"greet", "--json", "--zz"}, {"greet", "--zz", "--json"}} {
+		out, _, code := run(args...)
+		var v struct{ Usage bool }
+		if code != exitUsage || json.Unmarshal([]byte(out), &v) != nil || !v.Usage {
+			t.Errorf("%v: exit %d, stdout %q", args, code, out)
+		}
+	}
+}
+
 func TestUsageErrorsExit2(t *testing.T) {
 	for _, args := range [][]string{{"--zz"}, {"greet", "Ada", "--zz"}, {"greet"}, {"nope"}} {
 		out, errOut, code := run(args...)
@@ -52,12 +63,32 @@ func TestUsageErrorsExit2(t *testing.T) {
 
 func TestDescribeListsEveryCommand(t *testing.T) {
 	out, _, code := run("describe")
-	var d struct{ Commands []struct{ Name string } }
+	type flag struct{ Name string }
+	var d struct {
+		ExitCodes map[string]int
+		Flags     []flag
+		Commands  []struct {
+			Name  string
+			Flags []flag
+		}
+	}
 	if code != 0 || json.Unmarshal([]byte(out), &d) != nil {
 		t.Fatalf("exit %d, stdout %q", code, out)
 	}
+	names := func(fs []flag) (n []string) {
+		for _, f := range fs {
+			n = append(n, f.Name)
+		}
+		return n
+	}
+	if d.ExitCodes["usage"] != exitUsage || !slices.Contains(names(d.Flags), "version") {
+		t.Errorf("root: exit codes %v, flags %v", d.ExitCodes, names(d.Flags))
+	}
 	for _, c := range d.Commands {
 		if c.Name == "greet" {
+			if !slices.Contains(names(c.Flags), "json") || !slices.Contains(names(c.Flags), "help") {
+				t.Errorf("greet flags %v, want json and help", names(c.Flags))
+			}
 			return
 		}
 	}

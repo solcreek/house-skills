@@ -29,5 +29,11 @@ fn json_is_one_document() {
 fn describe_lists_every_command() {
     let out = cli().args(["describe"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(v["subcommands"].as_array().unwrap().iter().any(|c| c["name"] == "greet"));
+    assert_eq!(v["exitCodes"]["usage"], 2);
+    let names = |c: &serde_json::Value| -> Vec<String> {
+        c["flags"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect()
+    };
+    assert!(names(&v).contains(&"version".to_string()));
+    let greet = v["commands"].as_array().unwrap().iter().find(|c| c["name"] == "greet").unwrap();
+    assert!(names(greet).contains(&"json".to_string()) && names(greet).contains(&"help".to_string()));
 }

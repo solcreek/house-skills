@@ -8,6 +8,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 scaffold="$root/plugins/cli/skills/new/scripts/scaffold"
 probe="$root/plugins/cli/skills/audit/scripts/probe"
+runjson="$root/plugins/cli/skills/audit/scripts/run-json"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 pass=0
@@ -24,7 +25,25 @@ for args in "" "cobol $tmp/x my-cli" "go $tmp/x My_CLI" "go $tmp/x"; do
 done
 mkdir "$tmp/full"; touch "$tmp/full/x"
 got=0; out=$("$scaffold" typescript "$tmp/full" my-cli) || got=$?
-[ "$got" = 2 ] && echo "$out" | jq -e '.error | test("not empty")' > /dev/null && ok || no "non-empty dir: exit $got, $out"
+[ "$got" = 2 ] && echo "$out" | jq -e '.error | test("not an empty directory")' > /dev/null && ok || no "non-empty dir: exit $got, $out"
+got=0; out=$("$scaffold" typescript "$tmp/full/x/y" my-cli) || got=$?
+[ "$got" = 2 ] && echo "$out" | jq -e '.error | test("not an empty directory|cannot create")' > /dev/null && ok || no "dir under a file: exit $got, $out"
+
+# A step that fails answers in JSON, exit 1, and removes the DIR it made.
+# A stub go that fails `go get` stands in for a network failure.
+mkdir -p "$tmp/stub"
+printf '#!/bin/sh
+[ "$1" = get ] && { echo "dial tcp: no route" >&2; exit 1; }
+exit 0
+' > "$tmp/stub/go"
+chmod +x "$tmp/stub/go"
+got=0; out=$(PATH="$tmp/stub:$PATH" "$scaffold" go "$tmp/failing" my-cli) || got=$?
+if [ "$got" = 1 ] && echo "$out" | jq -e '.error and (.log | test("no route"))' > /dev/null && [ ! -e "$tmp/failing" ]; then ok
+else no "failed step: exit $got, $out, dir left: $(ls -d "$tmp/failing" 2>/dev/null)"; fi
+if command -v cargo > /dev/null; then
+  got=0; out=$("$scaffold" rust "$tmp/r" test) || got=$?
+  [ "$got" = 2 ] && [ ! -e "$tmp/r" ] && ok || no "reserved rust name: exit $got, $out"
+fi
 
 for stack in typescript rust go; do
   case "$stack" in typescript) need=node ;; rust) need=cargo ;; go) need=go ;; esac
@@ -39,6 +58,8 @@ for stack in typescript rust go; do
     no "$stack: placeholder left in $(grep -rlw tool "$d" --exclude-dir=target | tr '\n' ' ')"
   else ok; fi
 
+  # The binary is absolute, so the probe works from any directory.
+  case "$(echo "$out" | jq -r .binary)" in /*) ok ;; *) no "$stack: binary is not absolute" ;; esac
   build=$(echo "$out" | jq -r '.build // empty')
   test=$(echo "$out" | jq -r .test)
   bin=$(echo "$out" | jq -r .binary)
@@ -51,11 +72,22 @@ for stack in typescript rust go; do
     lvl=$1; shift
     [ "$lvl" = top ] && lvl=
     # shellcheck disable=SC2086
-    if "$probe" "$@" -- "$d/$bin" $lvl > "$tmp/p" 2>&1; then ok
+    if "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1; then ok
     else no "$stack probe '$level': $(jq -c '[.checks[]? | select(.status == "fail") | [.id, .detail]]' "$tmp/p" 2>/dev/null || cat "$tmp/p")"; fi
   done
-  if "$probe" --json-output -- "$d/$bin" describe > "$tmp/p" 2>&1; then ok; else no "$stack describe is not one JSON document"; fi
-  if "$probe" --json-output -- "$d/$bin" greet Ada --json > "$tmp/p" 2>&1; then ok; else no "$stack greet --json"; fi
+  if "$runjson" -- "$bin" greet Ada --json > "$tmp/p" 2>&1; then ok; else no "$stack greet --json"; fi
+  # describe: one document, in the shared shape (references/describe.md).
+  if "$runjson" -- "$bin" describe > "$tmp/p" 2>&1 &&
+     jq -e '.checks[0].run.stdout | fromjson |
+       (.name == "my-cli") and (.version | type == "string") and (.summary | type == "string")
+       and .exitCodes.ok == 0 and .exitCodes.failed == 1 and .exitCodes.usage == 2
+       and ([.flags[].name] | index("version") != null)
+       and all(.flags[]; has("name") and has("short") and has("takesValue") and has("description"))
+       and (.commands[] | select(.name == "greet") |
+            (.summary | type == "string") and (.usage | test("greet"))
+            and ([.flags[].name] | index("json") != null and index("help") != null)
+            and (.commands | type == "array"))' "$tmp/p" > /dev/null; then ok
+  else no "$stack describe shape: $(jq -r '.checks[0].run.stdout' "$tmp/p" | head -c 600)"; fi
 done
 
 echo "$pass passed, $fail failed"

@@ -13,8 +13,10 @@ Template: `templates/rust/` — `src/main.rs` and `tests/contract.rs`
 - **Exit codes**: clap's 2 for usage, and `main` maps any `anyhow` error to
   1. Add codes as `u8` constants returned from `run`, and list them in the
   top-level doc comment (it is the help text).
-- **`describe`** walks `Cli::command()`, so it is generated from the same
-  definitions as help (A10). It skips clap's own `help` subcommand.
+- **`describe`** walks `Cli::command()` after `build()`, which adds
+  `--help`/`--version` and copies global flags down, so it lists what help
+  shows (A10). It skips clap's own `help` subcommand. Add `mutates` to a
+  command's entry when you add one that mutates.
 - **Colour**: clap's output honours `NO_COLOR` and the terminal. For your own
   output use `anstream` and `anstyle` (clap's dependencies) rather than
   writing escape codes.

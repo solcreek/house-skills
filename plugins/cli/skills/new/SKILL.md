@@ -4,7 +4,7 @@ description: "Build a new command-line tool from scratch in TypeScript, Rust or 
 argument-hint: "[what the tool does]"
 allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/scripts/*)
-  - Bash(${CLAUDE_SKILL_DIR}/../audit/scripts/*)
+  - Bash(${CLAUDE_SKILL_DIR}/../audit/scripts/probe *)
 ---
 
 # New CLI
@@ -14,8 +14,8 @@ first commit. The templates already pass: every **must** rule, plus `--json`,
 `describe` and a short usage error. Your job is to keep them passing while
 you replace the example command with the real ones.
 
-`$S` is `${CLAUDE_SKILL_DIR}/scripts`. `$P` is
-`${CLAUDE_SKILL_DIR}/../audit/scripts/probe`.
+`$S` is `${CLAUDE_SKILL_DIR}/scripts`. `$A` is
+`${CLAUDE_SKILL_DIR}/../audit/scripts`.
 
 ## 1. Pick the stack
 
@@ -57,10 +57,11 @@ change is cheap:
     $S/scaffold STACK DIR NAME
 
 This copies the template, renames the placeholder to NAME, and adds the
-latest dependencies. It prints JSON with `files`, `build`, `test` and
-`binary`. Exit 2 means it could not start (`error` says why: a missing
-toolchain, or DIR is not empty); exit 1 means a step failed (`log` has the
-tail).
+latest dependencies. It prints JSON with `dir`, `files`, `build` and `test`
+(run both in `dir`), and `binary`, the absolute path to probe. Exit 2 means
+it could not start (`error` says why: a missing toolchain, DIR not empty, a
+name cargo reserves); exit 1 means a step failed (`log` has the tail, and a
+DIR it created is gone, so you can rerun it).
 
 For a tool inside an existing repository, scaffold into the directory where
 it will live, then fold the files into the repository's own layout and test
@@ -73,7 +74,9 @@ step 2, keeping:
 
 - the **help check before `run`** (TypeScript) and the usage-error mapping
   (Go). Neither is something the library does for you;
-- `describe`, generated from the same definitions as help;
+- `describe`, generated from the same definitions as help, in the shape of
+  [references/describe.md](references/describe.md) shared by all three
+  templates;
 - the exit-code table, documented in the top-level help. Add new codes to it,
   and never reuse one;
 - the contract tests, extended. For each command add a test that it rejects
@@ -82,17 +85,22 @@ step 2, keeping:
 
 ## 5. Verify
 
-Run the `test` command from step 3, then probe the top level and every
-command:
+Run `build` and `test` from step 3 in `dir`, then probe the top level and
+every command:
 
-    $P -- BINARY
-    $P -- BINARY COMMAND                           # add --skip unknown-command when
-                                                    # COMMAND takes a free positional
-    $P --json-output -- BINARY COMMAND ... --json  # read-only commands
-    $P --json-output -- BINARY describe
+    $A/probe -- BINARY
+    $A/probe -- BINARY COMMAND                 # add --skip unknown-command when
+                                               # COMMAND takes a free positional
+    $A/run-json -- BINARY describe
+    $A/run-json -- BINARY COMMAND … --json     # read-only commands; --lines for NDJSON
 
-Every check must pass. Fix the code, not the check. A skip is fine only for
-the reason `--skip unknown-command` gives above.
+`run-json` runs the command, so it asks for approval: run it only on
+commands that are read-only and local.
+
+Every check must pass. Fix the code, not the check. The expected skips are:
+`version` on a subcommand, `unknown-command` where a command takes a free
+positional, and `no-color-env` when the tool never colours. Any other skip
+needs a reason in your report.
 
 ## 6. Ship the agent context
 

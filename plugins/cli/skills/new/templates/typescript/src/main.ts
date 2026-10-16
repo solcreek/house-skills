@@ -2,6 +2,7 @@ import { parseArgs, styleText } from "node:util";
 
 const NAME = "tool";
 const VERSION = "0.1.0";
+const SUMMARY = "one line on what it is for";
 
 // Every exit code, in help and in `describe`. Add to it; never reuse one.
 const EXIT = { ok: 0, failed: 1, usage: 2 } as const;
@@ -46,7 +47,7 @@ const commands: Command[] = [
 function help(): string {
   const width = Math.max(...commands.map((c) => c.usage.length));
   return [
-    `${NAME}: one line on what it is for`,
+    `${NAME}: ${SUMMARY}`,
     "",
     "Usage:",
     ...commands.map((c) => `  ${NAME} ${c.usage.padEnd(width)}  ${c.summary}`),
@@ -75,13 +76,36 @@ function commandHelp(c: Command): string {
   ].join("\n");
 }
 
-// The same definitions as --help, as data (rubric A10).
+// The same definitions as --help, as data (rubric A10), in the shape every
+// template's describe prints: see references/describe.md.
+function flagList(options: Record<string, Option>) {
+  return Object.entries(options).map(([name, o]) => ({
+    name,
+    short: o.short ?? null,
+    takesValue: o.type === "string",
+    description: o.description,
+  }));
+}
+
 function describe() {
   return {
     name: NAME,
     version: VERSION,
+    summary: SUMMARY,
     exitCodes: EXIT,
-    commands: commands.map(({ run: _, ...c }) => ({ ...c, options: { ...c.options, ...COMMON } })),
+    flags: flagList({
+      help: COMMON.help,
+      version: { type: "boolean", description: "print the version" },
+    }),
+    commands: commands.map((c) => ({
+      name: c.name,
+      summary: c.summary,
+      usage: `${NAME} ${c.usage}`,
+      mutates: c.mutates,
+      examples: c.examples,
+      flags: flagList({ ...c.options, ...COMMON }),
+      commands: [],
+    })),
   };
 }
 
@@ -130,7 +154,8 @@ try {
   const message = e instanceof Error ? e.message : String(e);
   console.error(`${NAME}: ${message}`);
   if (usage) console.error(`Run '${NAME} --help' for usage.`);
-  // Under --json a failure is JSON too (rubric A5).
+  // Under --json a failure is JSON too (rubric A5). The only place argv is
+  // searched by hand: parsing may have failed before it saw --json.
   if (argv.includes("--json")) console.log(JSON.stringify({ error: message, usage }));
   process.exitCode = usage ? EXIT.usage : EXIT.failed;
 }

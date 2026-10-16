@@ -20,7 +20,13 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
   output with `cmd.OutOrStdout()` so tests can capture it.
 - **`--json` is a persistent flag** on the root, so every command has it.
 - **`describe`** walks the cobra tree (A10). It leaves out `completion` and
-  hidden commands.
+  hidden commands. It calls `InitDefaultHelpFlag`/`InitDefaultVersionFlag`
+  first and reads `LocalFlags` plus `InheritedFlags`: `Flags()` alone misses
+  `--help`, `--version` and the persistent `--json` on every command that is
+  not running.
+- **`--json` on a failure**: pflag stops at a bad flag, so `greet --zz --json`
+  never sets `asJSON`. `main` also looks for `--json` in `os.Args` on the
+  error path; keep that.
 - **Colour**: `fatih/color` honours `NO_COLOR` and the terminal. cobra's
   `completion` command comes free; keep it (D5).
 - **Version**: `var version` is set at release with

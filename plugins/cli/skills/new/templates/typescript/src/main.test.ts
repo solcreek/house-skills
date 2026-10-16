@@ -39,7 +39,12 @@ test("--json is one document, failures included", () => {
   assert.equal(JSON.parse(r.out).usage, true);
 });
 
-test("describe lists every command", () => {
+test("describe lists every command, with the flags --help shows", () => {
+  type Flag = { name: string };
   const d = JSON.parse(run("describe").out);
-  assert.ok(d.commands.some((c: { name: string }) => c.name === "greet"));
+  const names = (flags: Flag[]) => flags.map((f) => f.name);
+  assert.equal(d.exitCodes.usage, 2);
+  assert.ok(names(d.flags).includes("version"));
+  const greet = d.commands.find((c: { name: string }) => c.name === "greet");
+  assert.deepEqual(names(greet.flags).sort(), ["help", "json"]);
 });
