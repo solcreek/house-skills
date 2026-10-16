@@ -66,8 +66,9 @@ for stack in typescript rust go; do
   if [ -n "$build" ] && ! (cd "$d" && $build) > "$tmp/log" 2>&1; then no "$stack build"; tail -20 "$tmp/log"; continue; fi
   if (cd "$d" && $test) > "$tmp/log" 2>&1; then ok; else no "$stack contract tests"; tail -30 "$tmp/log"; fi
 
-  # greet takes a free NAME, so an unknown subcommand there is a name.
-  for level in "top" "greet --skip unknown-command"; do
+  # greet and touch take a free positional, so an unknown subcommand there
+  # is an argument; describe takes none, so it gets every check.
+  for level in "top" "greet --skip unknown-command" "touch --skip unknown-command" "describe"; do
     set -- $level
     lvl=$1; shift
     [ "$lvl" = top ] && lvl=
@@ -76,18 +77,24 @@ for stack in typescript rust go; do
     else no "$stack probe '$level': $(jq -c '[.checks[]? | select(.status == "fail") | [.id, .detail]]' "$tmp/p" 2>/dev/null || cat "$tmp/p")"; fi
   done
   if "$runjson" -- "$bin" greet Ada --json > "$tmp/p" 2>&1; then ok; else no "$stack greet --json"; fi
+  # A mutating command under --dry-run is read-only; its failures are JSON too.
+  if "$runjson" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1; then ok; else no "$stack touch --dry-run --json: $(cat "$tmp/p")"; fi
+  if "$runjson" --expect-exit 2 -- "$bin" touch x --json > "$tmp/p" 2>&1; then ok; else no "$stack touch without --yes: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
+  if "$runjson" --expect-exit 1 -- "$bin" touch ../x --yes --json > "$tmp/p" 2>&1; then ok; else no "$stack touch ../x: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # describe: one document, in the shared shape (references/describe.md).
-  if "$runjson" -- "$bin" describe > "$tmp/p" 2>&1 &&
-     jq -e '.checks[0].run.stdout | fromjson |
+  # run-json keeps only 2000 bytes of stdout, so read the whole document directly.
+  if "$runjson" -- "$bin" describe > "$tmp/p" 2>&1 && "$bin" describe > "$tmp/d" &&
+     jq -e '
        (.name == "my-cli") and (.version | type == "string") and (.summary | type == "string")
        and .exitCodes.ok == 0 and .exitCodes.failed == 1 and .exitCodes.usage == 2
        and ([.flags[].name] | index("version") != null)
-       and all(.flags[]; has("name") and has("short") and has("takesValue") and has("description"))
-       and (.commands[] | select(.name == "greet") |
-            (.summary | type == "string") and (.usage | test("greet"))
-            and ([.flags[].name] | index("json") != null and index("help") != null)
-            and (.commands | type == "array"))' "$tmp/p" > /dev/null; then ok
-  else no "$stack describe shape: $(jq -r '.checks[0].run.stdout' "$tmp/p" | head -c 600)"; fi
+       and all(.flags[], .commands[].flags[]; has("name") and has("short") and has("takesValue") and has("default") and has("description"))
+       and all(.commands[]; (.mutates | type == "boolean") and (.summary | type == "string") and (.commands | type == "array"))
+       and (.commands[] | select(.name == "greet") | (.usage | test("greet")) and .mutates == false
+            and ([.flags[].name] | index("json") != null and index("help") != null))
+       and (.commands[] | select(.name == "touch") | .mutates
+            and ([.flags[].name] | index("dry-run") != null and index("yes") != null))' "$tmp/d" > /dev/null; then ok
+  else no "$stack describe shape: $(head -c 600 "$tmp/d")"; fi
 done
 
 echo "$pass passed, $fail failed"

@@ -22,6 +22,13 @@ Template: `templates/rust/` — `src/main.rs` and `tests/contract.rs`
   writing escape codes.
 - **`--json` is global**, so every subcommand accepts it. A command that
   reports nothing should say so under `--json` rather than print prose.
+- **`main` uses `try_parse`**, so a usage error under `--json` is JSON too
+  (A5). It lets clap print help and version itself.
+- **Mutating commands flatten `Change`**: an `ArgGroup` that is required and
+  not multiple, so clap refuses neither and both with exit 2. `describe`
+  marks a command `mutates` when it has `--yes`.
+- **Tests** use `tempfile` for a fresh directory per case, with `TOOL_HOME`
+  pointing inside it.
 
 ## Distribution
 
