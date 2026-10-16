@@ -45,7 +45,7 @@ not adopted" at the end.
 
 | id | tier | rule | check |
 |---|---|---|---|
-| A1 | should (must for agent-called tools) | Every command that reports something has `--json`: one document on stdout, stable field names, the same exit codes. | probe `--json-output` |
+| A1 | should (must for agent-called tools) | Every command that reports something has `--json`: one document on stdout (or NDJSON, one value per line, for a stream it documents as such), stable field names, the same exit codes. | `run-json` (`--lines` for NDJSON) |
 | A2 | must | Never waits on stdin or a prompt when stdin is not a terminal. | every probe run (a timeout fails it) |
 | A3 | must | No colour, pager, spinner or cursor control when the stream is not a terminal, and `NO_COLOR` is honoured. | probe `no-color-piped`, `no-color-env` |
 | A4 | should | An error says what to do next: the exact command, flag or file. "Not found" names what was looked for and where. | **read** error strings |
@@ -64,7 +64,7 @@ not adopted" at the end.
 |---|---|---|---|
 | D1 | should | `--version` prints a version number to stdout and exits 0. | probe `version` |
 | D2 | should | Help leads with usage, shows at least one example per command, and fits 100 columns. | probe `help-width`; **read** help |
-| D3 | should | A usage error prints one or two lines and points to `--help`. It does not dump the whole help to stderr. | probe `unknown-flag` stderr size |
+| D3 | should | A usage error prints one or two lines, names what was wrong, and points to `--help`. It does not dump the whole help to stderr. | probe `usage-message` |
 | D4 | should | Names are consistent: one verb per idea (`list`/`show`/`create`/`delete`, not `ls` here and `list` there), kebab-case long flags, a long form for every short flag, same flag same meaning everywhere. | **read** |
 | D5 | taste | Shell completion, and "did you mean" for misspelt subcommands. | **read** |
 
@@ -81,7 +81,7 @@ not adopted" at the end.
 
 | id | tier | rule | check |
 |---|---|---|---|
-| P1 | should | `--help` returns in 300 ms or less. Heavy imports load lazily, after argument parsing. | probe `startup` |
+| P1 | should | `--help` returns in 300 ms or less. Arguments are parsed first: heavy imports and slow work (a fetch, a scan, finding the repository) come after, so a bad flag or `--help` is answered at once. | probe `startup`; **read** |
 | P2 | should | Network calls have timeouts and say what they are waiting on (on stderr). | **read** |
 
 ## Reporting a finding
