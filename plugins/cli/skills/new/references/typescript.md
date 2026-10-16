@@ -39,7 +39,9 @@ Template: `templates/typescript/` — `bin/NAME` (the entry point), `src/main.ts
 ## Startup (P1)
 
 `bin/tool` is a small ES module, not a shell script: it turns on Node's
-compile cache (in the system temp directory) and imports `src/main.ts`.
+compile cache in the tool's own cache directory (`home("cache")`, never the
+shared temp directory, where another user could plant code) and imports
+`src/main.ts`.
 Skipping bash and reusing compiled code took `--help` on s-imac from about
 300 ms to 80–110 ms on Node 24, and 170 ms on Node 22.18, measured
 2026-10-15 under a load average of 40–50. Keep `--help` under 300 ms by

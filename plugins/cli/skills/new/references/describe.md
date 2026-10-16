@@ -9,7 +9,7 @@ when you add commands; add fields, never rename them.
   "name": "tool",
   "version": "0.1.0",
   "summary": "one line on what it is for",
-  "exitCodes": { "ok": 0, "failed": 1, "usage": 2 },
+  "exitCodes": { "ok": 0, "failed": 1, "usage": 2, "partial": 3 },
   "flags": [{ "name": "help", "short": "h", "type": "boolean", "default": null, "description": "…" }],
   "commands": [
     {

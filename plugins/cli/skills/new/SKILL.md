@@ -86,8 +86,8 @@ The template has two example commands, each a pattern to copy:
   an integer flag, the capped list shape with its stderr note, a missing
   input as failed, and unreadable parts as a partial result (exit 3).
 - `touch PATH` mutates: `--dry-run`/`--yes`, an output path checked by
-  `inside`, a rerun that changes nothing, and state written atomically under
-  `home("state")`.
+  `inside`, a rerun that changes nothing, and a line appended to its state
+  under `home("state")`, where a failure to record is only a warning.
 
 Model your commands on them, then delete them. Keep:
 
@@ -97,8 +97,9 @@ Model your commands on them, then delete them. Keep:
 - the mutating pattern: `mutates: true` (TypeScript), flattening `Change`
   (Rust), or `mutating(cmd)` plus `change(cmd)` (Go);
 - the helpers: `inside` for any path the tool writes (create with
-  create-only-if-absent), `write_atomic`/`writeAtomic` to replace a file,
-  `home` for config, cache and state, and `capped` for every list;
+  create-only-if-absent), `home` for config, cache and state, `homes` so a
+  walk skips them, `appendState` for history-like state, `capped` for every
+  list, and `reason` for an error's words without its path;
 - `describe`, generated from the same definitions as help, in the shape of
   [references/describe.md](references/describe.md) shared by all three
   templates;

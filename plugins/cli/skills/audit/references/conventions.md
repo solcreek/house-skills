@@ -69,10 +69,14 @@ files, caches, git state, remote services. In `describe` it has
 
 ## Paths
 
-- An input path resolves against the current directory and may contain
-  `..`. If it does not exist, that is failed (1), and the message names it.
-  A walk does not follow symlinks, and skips the tool's own `NAME_HOME`
-  when that lies inside the tree.
+- An input path resolves against the current directory by its text, so
+  `a/..` is `.`, whatever `a` links to. If it does not exist, or is not a
+  directory where one is needed, that is failed (1), and the message says
+  which. A walk starts from the real path (so a symlinked input is walked),
+  never follows a symlink inside, and skips the tool's own directories. If
+  the input itself cannot be read, that is failed (1), not partial.
+- Error words are the operating system's, without the path they repeat:
+  `permission denied`, the same in every template.
 - An output path must name a file plainly inside the root the command
   writes to (the current directory, unless the command documents another).
   Refuse, with failed (1) naming the path: a `..` part, a trailing slash,
@@ -95,6 +99,16 @@ files, caches, git state, remote services. In `describe` it has
 - **Cache or state?** A cache is safe to delete: the tool rebuilds it, and
   nothing is lost. Anything whose loss loses information (what the user
   saved, marked or dismissed) is state, whatever the request calls it.
+- **Writing state.** A log or history is appended, one JSON line per entry
+  (`O_APPEND`): nothing is read back, so concurrent runs lose nothing and a
+  corrupt file is never overwritten. A file that must be replaced is
+  written to a temp file with a unique name beside it and renamed over it,
+  under a lock if two runs may race. Directories are created 0700, files
+  0600. With no home to write in (HOME unset), say so; never fall back to
+  the current directory.
+- **When recording fails**, the command's action still happened: report it
+  (`"recorded": false` and a warning on stderr), exit 0, and never undo or
+  hide the action.
 
 ## Agent context
 
