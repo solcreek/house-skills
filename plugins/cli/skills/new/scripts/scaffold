@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Create a new CLI from a template that already passes cli:audit's probe.
+#
+#   scaffold STACK DIR NAME
+#
+# STACK is typescript, rust or go. DIR must not exist, or be empty. NAME is
+# the command's name (lowercase, digits, hyphens). Copies the template,
+# renames the placeholder command `tool` to NAME, and adds dependencies at
+# their latest versions (rust: cargo add; go: go get). Prints JSON with the
+# files, the build/test commands, and the binary to probe.
+#
+# Exit: 0 created, 1 a step failed (output in `error`; DIR may be partial),
+# 2 cannot start (toolchain missing, DIR not empty), 64 bad usage.
+set -euo pipefail
+
+usage() { echo "usage: scaffold typescript|rust|go DIR NAME" >&2; exit 64; }
+[ $# -eq 3 ] || usage
+stack=$1 dir=$2 name=$3
+case "$stack" in typescript|rust|go) ;; *) usage ;; esac
+echo "$name" | grep -Eq '^[a-z][a-z0-9-]*$' || { echo "scaffold: NAME must match [a-z][a-z0-9-]*" >&2; exit 64; }
+
+templates="$(cd "$(dirname "$0")/../templates" && pwd)"
+cant() { jq -n --arg e "$1" '{error: $e}'; exit 2; }
+failed() { jq -n --arg e "$1" --arg log "$(tail -c 4000 "$log")" '{error: $e, log: $log}'; exit 1; }
+command -v jq >/dev/null || { echo '{"error":"jq not found"}'; exit 2; }
+command -v perl >/dev/null || cant "perl not found"
+
+case "$stack" in
+  typescript) need=node ;;
+  rust) need=cargo ;;
+  go) need=go ;;
+esac
+command -v "$need" >/dev/null || cant "$need not found; install it, or pick another stack"
+if [ "$stack" = typescript ]; then
+  major=$(node -p 'process.versions.node.split(".").map(Number).reduce((a, b, i) => i < 2 ? a * 1000 + b : a)')
+  # Type stripping without a flag: 22.18 and later.
+  [ "$major" -ge 22018 ] || cant "node $(node --version) is too old; the template runs .ts directly and needs 22.18 or later"
+fi
+if [ -e "$dir" ] && [ -n "$(ls -A "$dir")" ]; then cant "not empty: $dir"; fi
+mkdir -p "$dir"
+dir="$(cd "$dir" && pwd)"
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+
+cp -R "$templates/$stack/." "$dir/"
+# The placeholder is the whole word `tool`; the templates use it for nothing else.
+find "$dir" -type f -exec perl -pi -e "s/\\btool\\b/$name/g" {} +
+
+cd "$dir"
+case "$stack" in
+  typescript)
+    mv bin/tool "bin/$name"
+    bin="bin/$name"
+    build=""
+    test="npm test"
+    ;;
+  rust)
+    # cargo init keeps an existing src/main.rs and only writes Cargo.toml.
+    cargo init -q --vcs none --name "$name" . > "$log" 2>&1 || failed "cargo init"
+    {
+      cargo add -q clap --features derive &&
+      cargo add -q serde_json anyhow &&
+      cargo add -q --dev assert_cmd predicates
+    } >> "$log" 2>&1 || failed "cargo add"
+    bin="target/debug/$name"
+    build="cargo build"
+    test="cargo test"
+    ;;
+  go)
+    {
+      go mod init "$name" &&
+      go get github.com/spf13/cobra@latest &&
+      go mod tidy
+    } > "$log" 2>&1 || failed "go mod / go get"
+    bin="./$name"
+    build="go build -o $name ."
+    test="go test ./..."
+    ;;
+esac
+
+jq -n --arg stack "$stack" --arg dir "$dir" --arg name "$name" --arg bin "$bin" \
+  --arg build "$build" --arg test "$test" \
+  --argjson files "$(find . -type f -not -path './target/*' -not -path './.git/*' | sed 's|^\./||' | sort | jq -R . | jq -s .)" \
+  '{stack: $stack, dir: $dir, name: $name, files: $files,
+    build: (if $build == "" then null else $build end), test: $test, binary: $bin}'

@@ -1,0 +1,9 @@
+{
+  "name": "tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "tool": "bin/tool" },
+  "engines": { "node": ">=22.18" },
+  "scripts": { "test": "node --test 'src/**/*.test.ts'" }
+}

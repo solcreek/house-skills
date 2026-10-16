@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Tests for cli:new's scaffold. For each stack whose toolchain is installed,
+# scaffolds a CLI named `my-cli`, runs the template's own contract tests, and
+# probes the binary with cli:audit's probe: a new CLI must pass it with no
+# failure. Rust and Go fetch dependencies, so this needs the network.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+scaffold="$root/plugins/cli/skills/new/scripts/scaffold"
+probe="$root/plugins/cli/skills/audit/scripts/probe"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+pass=0
+fail=0
+ok() { pass=$((pass + 1)); }
+no() { echo "FAIL $1"; fail=$((fail + 1)); }
+
+# Usage and refusals, no toolchain needed.
+for args in "" "cobol $tmp/x my-cli" "go $tmp/x My_CLI" "go $tmp/x"; do
+  got=0
+  # shellcheck disable=SC2086
+  "$scaffold" $args > /dev/null 2>&1 || got=$?
+  [ "$got" = 64 ] && ok || no "usage '$args': exit $got, want 64"
+done
+mkdir "$tmp/full"; touch "$tmp/full/x"
+got=0; out=$("$scaffold" typescript "$tmp/full" my-cli) || got=$?
+[ "$got" = 2 ] && echo "$out" | jq -e '.error | test("not empty")' > /dev/null && ok || no "non-empty dir: exit $got, $out"
+
+for stack in typescript rust go; do
+  case "$stack" in typescript) need=node ;; rust) need=cargo ;; go) need=go ;; esac
+  if ! command -v "$need" > /dev/null; then echo "SKIP $stack: no $need"; continue; fi
+  d="$tmp/$stack"
+  got=0; out=$("$scaffold" "$stack" "$d" my-cli) || got=$?
+  if [ "$got" != 0 ]; then no "$stack scaffold: exit $got: $out"; continue; fi
+  ok
+
+  # The placeholder is gone everywhere.
+  if grep -rlw tool "$d" --exclude-dir=target > /dev/null 2>&1; then
+    no "$stack: placeholder left in $(grep -rlw tool "$d" --exclude-dir=target | tr '\n' ' ')"
+  else ok; fi
+
+  build=$(echo "$out" | jq -r '.build // empty')
+  test=$(echo "$out" | jq -r .test)
+  bin=$(echo "$out" | jq -r .binary)
+  if [ -n "$build" ] && ! (cd "$d" && $build) > "$tmp/log" 2>&1; then no "$stack build"; tail -20 "$tmp/log"; continue; fi
+  if (cd "$d" && $test) > "$tmp/log" 2>&1; then ok; else no "$stack contract tests"; tail -30 "$tmp/log"; fi
+
+  # greet takes a free NAME, so an unknown subcommand there is a name.
+  for level in "top" "greet --skip unknown-command"; do
+    set -- $level
+    lvl=$1; shift
+    [ "$lvl" = top ] && lvl=
+    # shellcheck disable=SC2086
+    if "$probe" "$@" -- "$d/$bin" $lvl > "$tmp/p" 2>&1; then ok
+    else no "$stack probe '$level': $(jq -c '[.checks[]? | select(.status == "fail") | [.id, .detail]]' "$tmp/p" 2>/dev/null || cat "$tmp/p")"; fi
+  done
+  if "$probe" --json-output -- "$d/$bin" describe > "$tmp/p" 2>&1; then ok; else no "$stack describe is not one JSON document"; fi
+  if "$probe" --json-output -- "$d/$bin" greet Ada --json > "$tmp/p" 2>&1; then ok; else no "$stack greet --json"; fi
+done
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]
