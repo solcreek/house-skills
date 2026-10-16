@@ -146,11 +146,17 @@ files, caches, git state, remote services. In `describe` it has
   temp file beside the target, rename it over the target, release the lock.
   The rename never follows a symlink planted after the check. Copy the
   target's mode onto the temp file (new files 0600), and remove the temp
-  file on any failure and on Ctrl-C.
-- **The lock** is `NAME.lock` beside the file, created with
-  create-only-if-absent and holding the owner's pid. Wait up to 2 s, then
-  exit 4 (busy). A lock whose pid no longer runs is stale: remove it and
-  retry once. The templates' `withLock` and `replaceFile` do all of this.
+  file on any failure this run caused. A run killed mid-write leaves at most
+  one uniquely named temp file; Go removes its own on Ctrl-C.
+- **The lock** is the OS's advisory lock on `NAME.lock` beside the file
+  (`flock`, `LockFileEx` on Windows, Rust's `File::try_lock`): the kernel
+  releases it when the process ends, so a crash leaves nothing stale and no
+  pid can be reused. Never a pid file: one written in two steps can be read
+  empty, and removing a "stale" one races its owner. Where there is no OS
+  lock (Node), the lock is a directory made with `mkdir`, taken over only
+  once it is older than any run holds it (10 s). Wait up to 2 s, then exit 4
+  (busy). The templates' `withLock` and `replaceFile` do this, and their
+  tests run concurrent writers and check nothing was lost.
 - **Reading state back**, a line that does not parse is kept as it is,
   never dropped, and never counts as gone.
 - **When recording is a side effect** (`touch` noting what it made), the

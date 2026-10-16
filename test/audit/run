@@ -143,7 +143,9 @@ runjson "--stdin feeds the command" 0 \
   '.checks[0].run.stdout | fromjson | .got == "sekrit"' --stdin "$tmp/secret" -- "$fx/good" --echo-stdin
 runjson "no --stdin: stdin at EOF" 0 \
   '.checks[0].run.stdout | fromjson | .got == ""' -- "$fx/good" --echo-stdin
-runjson "--stdin needs a readable file" 2 '.error | test("not a readable file")' --stdin "$tmp/none" -- "$fx/good" --echo-stdin
+runjson "--stdin needs something readable" 2 '.error | test("not readable")' --stdin "$tmp/none" -- "$fx/good" --echo-stdin
+runjson "--stdin takes a process substitution" 0 \
+  '.checks[0].run.stdout | fromjson | .got == "piped"' --stdin <(printf 'piped') -- "$fx/good" --echo-stdin
 
 # The working directory is empty and temporary unless the caller names one.
 probe "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"

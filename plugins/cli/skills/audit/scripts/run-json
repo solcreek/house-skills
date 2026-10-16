@@ -54,8 +54,12 @@ command -v jq > /dev/null || { echo '{"error":"jq not found"}'; exit 2; }
 command -v perl > /dev/null || { echo '{"error":"perl not found"}'; exit 2; }
 cmd=$(resolve "$1") || { echo "$cmd"; exit 2; }
 if [ -n "$stdin_from" ]; then
-  [ -f "$stdin_from" ] && [ -r "$stdin_from" ] || { jq -n --arg e "not a readable file: $stdin_from" '{error: $e}'; exit 2; }
-  stdin_from="$(cd "$(dirname "$stdin_from")" && pwd)/$(basename "$stdin_from")"
+  # A pipe or <(…) is fine, so a secret never has to be written to disk.
+  [ -r "$stdin_from" ] && [ ! -d "$stdin_from" ] || { jq -n --arg e "not readable: $stdin_from" '{error: $e}'; exit 2; }
+  case "$stdin_from" in
+    /*) ;;
+    *) stdin_from="$(cd "$(dirname "$stdin_from")" && pwd)/$(basename "$stdin_from")" ;;
+  esac
 fi
 shift
 base=("$cmd" "$@")

@@ -21,8 +21,11 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
   would silently skip the root's mutating guard. Keep it.
 - **Rewriting a file**: `withLock(dir, name, fn)` around `replaceFile(dir,
   name, data)`; a held lock is `busyError`, exit 4. `main`'s signal handler
-  removes the run's lock and temp files on Ctrl-C. It cross-compiles to
-  Windows (`os.FindProcess` and signal 0 check the lock's owner).
+  removes the run's temp files on Ctrl-C. The lock is `flock`
+  (`lock_unix.go`) or kernel32's `LockFileEx` (`lock_windows.go`, called
+  through `syscall` so go.mod needs no `golang.org/x/sys`); the kernel drops
+  it when the process ends. The Windows file builds and vets; it has not
+  been run on Windows (verified 2026-10-16).
 - **The tests are `package main`**, so their helpers (`run`, `decode`,
   `tree`, `must`, `result`) share a namespace with `main.go`; rename a clash
   rather than the helpers, or move the tests to `package main_test`.

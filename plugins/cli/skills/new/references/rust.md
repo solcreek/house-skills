@@ -40,10 +40,10 @@ Template: `templates/rust/` — `src/main.rs` and `tests/contract.rs`
   pointing inside it, and run in parallel (cargo's default).
 - **Rewriting a file**: `with_lock(dir, name, || …)` around
   `replace_file(dir, name, data)`; a held lock is the `Busy` error, exit 4.
-  It checks the owner with `kill -0`, so no crate is needed. There is no
-  Ctrl-C handler: a killed run leaves a stale lock, which the next run takes,
-  and at most one `.NAME.PID.*.tmp`. Add the `ctrlc` crate if a tool must
-  clean those up itself (rubric E5).
+  The lock is std's `File::try_lock` (Rust 1.89 or later): the kernel drops
+  it when the process ends, so nothing goes stale. There is no Ctrl-C
+  handler: a killed run leaves at most one `.NAME.PID.*.tmp`. Add the
+  `ctrlc` crate if a tool must clean that up itself (rubric E5).
 
 ## Distribution
 

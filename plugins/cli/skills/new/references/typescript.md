@@ -21,9 +21,12 @@ Template: `templates/typescript/` — `bin/NAME` (the entry point), `src/main.ts
   an expected failure (exit 1, message only) and `Busy` for a held lock
   (exit 4). Anything else is a bug: exit 1 with the stack.
 - **Rewriting a file**: `withLock(dir, name, fn)` then `replaceFile(dir,
-  name, data)` inside it. A SIGINT or SIGTERM removes the lock and any temp
-  file the run made. `appendState` takes the same lock, so an append never
-  lands in a file being renamed away.
+  name, data)` inside it. Node has no OS file lock, so the lock is a
+  directory (`mkdir` is atomic) with an owner token inside; one older than
+  10 s was left by a dead run and is taken over. There is no signal handler:
+  the template's code is synchronous, so one would never run, and installing
+  one stops Ctrl-C from ending the process. `appendState` takes the same
+  lock, so an append never lands in a file being renamed away.
 - **Reading stdin** (a secret): `readFileSync(0, "utf8")` once, after the
   argument checks, and only when `process.stdin.isTTY` is false; otherwise
   refuse with a `UsageError` naming the pipe. The test helper's `run` takes
