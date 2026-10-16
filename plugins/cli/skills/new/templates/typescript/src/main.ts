@@ -163,51 +163,65 @@ function appendState(name: string, entry: unknown): boolean {
   }
 }
 
-// Paths to remove if the run is interrupted: a lock or a temp file it made.
-const ours = new Set<string>();
-for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
-  process.on(signal, () => {
-    for (const p of ours) rmSync(p, { force: true });
-    process.exit(code);
-  });
-
 const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const running = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as { code?: string }).code === "EPERM"; // alive, someone else's
-  }
-};
 
-// Run fn holding dir/name.lock (conventions: State). The lock is created
-// only if absent and holds our pid; one whose pid is gone is stale and
-// removed. After 2 s of someone else holding it: Busy, exit 4.
+// Longer than any run holds the lock (a read, a rename: milliseconds), so a
+// lock this old was left by a run that died.
+const STALE_MS = 10_000;
+
+// Run fn holding dir/name.lock (conventions: State). Node has no OS file
+// lock, so the lock is a directory: mkdir creates it atomically or fails. A
+// run that dies leaves it; once it is older than STALE_MS the next run takes
+// it over by renaming it away, which only one run can do. Until then, and
+// while another run holds it, 2 s of waiting ends in Busy, exit 4.
 function withLock<T>(dir: string, name: string, fn: () => T): T {
   const lock = inside(dir, `${name}.lock`);
-  for (let deadline = Date.now() + 2000, stale = false; ; ) {
+  const token = `${process.pid}.${randomBytes(4).toString("hex")}`;
+  for (const deadline = Date.now() + 2000; ; pause(20)) {
     try {
-      writeFileSync(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+      mkdirSync(lock, { mode: 0o700 });
+      writeFileSync(join(lock, token), "");
       break;
     } catch (e) {
-      if ((e as { code?: string }).code !== "EEXIST") throw e;
+      if ((e as { code?: string }).code !== "EEXIST") throw new Failure(`cannot lock ${lock}: ${reason(e)}`);
     }
-    const owner = Number(readFileSync(lock, "utf8"));
-    if (!stale && !(owner > 0 && running(owner))) {
-      stale = true; // once: a second stale lock means another run is racing
-      rmSync(lock, { force: true });
+    let age: number;
+    try {
+      age = Date.now() - statSync(lock).mtimeMs;
+    } catch {
+      continue; // released meanwhile
+    }
+    if (age > STALE_MS) {
+      const away = `${lock}.stale.${token}`;
+      try {
+        renameSync(lock, away);
+        rmSync(away, { recursive: true, force: true });
+      } catch {} // another run took it over first
       continue;
     }
-    if (Date.now() > deadline) throw new Busy(`${join(dir, name)} is locked by pid ${owner}; retry`);
-    pause(50);
+    if (Date.now() > deadline) throw new Busy(`${join(dir, name)} is locked by another run; retry`);
   }
-  ours.add(lock);
   try {
     return fn();
   } finally {
-    rmSync(lock, { force: true });
-    ours.delete(lock);
+    // Only our own lock: if ours was taken over as stale, the token is gone
+    // and the directory belongs to someone else.
+    try {
+      rmSync(join(lock, token));
+      rmSync(lock, { recursive: true });
+    } catch {}
+  }
+}
+
+// The path as touch records it: the parent's real path and the name, so
+// forget finds it however the caller spells it (a symlinked directory,
+// macOS's /tmp). A parent that does not exist is taken as written.
+function recorded(path: string): string {
+  const full = resolve(path);
+  try {
+    return join(realpathSync(dirname(full)), basename(full));
+  } catch {
+    return full;
   }
 }
 
@@ -221,16 +235,18 @@ function replaceFile(dir: string, name: string, data: string) {
   try {
     mode = statSync(target).mode & 0o777;
   } catch {} // new file
-  ours.add(temp);
   try {
     writeFileSync(temp, data, { flag: "wx", mode });
+  } catch (e) {
+    // Not ours to remove: the create failed.
+    throw new Failure(`cannot write ${target}: ${reason(e)}`);
+  }
+  try {
     chmodSync(temp, mode); // the umask may have narrowed it
     renameSync(temp, target);
   } catch (e) {
     rmSync(temp, { force: true });
     throw new Failure(`cannot write ${target}: ${reason(e)}`);
-  } finally {
-    ours.delete(temp);
   }
 }
 
@@ -351,9 +367,10 @@ const commands: Command[] = [
       // Writing state is this command's action, so failing to is failing.
       const state = home("state");
       if (!state) throw new Failure("no home directory; set TOOL_HOME or XDG_STATE_HOME");
-      const target = resolve(plain("PATH", path));
+      const target = recorded(plain("PATH", path));
       const dryRun = Boolean(values["dry-run"]);
-      const file = join(state, "history.jsonl");
+      // A symlinked history is refused whether or not this is a dry run.
+      const file = existsSync(state) ? inside(state, "history.jsonl") : join(state, "history.jsonl");
       const change = () => {
         let text = "";
         try {

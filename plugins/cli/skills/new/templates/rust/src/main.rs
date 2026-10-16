@@ -254,8 +254,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             // Writing state is this command's action, so failing to is failing.
             plain("PATH", &path.to_string_lossy())?;
             let state = home("state").ok_or_else(|| anyhow!("no home directory; set TOOL_HOME or XDG_STATE_HOME"))?;
-            let target = lexical(&std::path::absolute(path)?).display().to_string();
-            let file = state.join("history.jsonl");
+            let target = recorded(path)?;
+            // A symlinked history is refused whether or not this is a dry run.
+            let file = if state.exists() { inside(&state, Path::new("history.jsonl"))? } else { state.join("history.jsonl") };
             let edit = || -> anyhow::Result<usize> {
                 let text = match std::fs::read_to_string(&file) {
                     Ok(t) => t,
@@ -474,47 +475,35 @@ fn append_state(name: &str, entry: &Value) -> bool {
     result.is_ok()
 }
 
-// Whether pid runs: kill -0, which needs no crate.
-fn running(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-// Run f holding dir/name.lock (conventions: State). The lock is created only
-// if absent and holds our pid; one whose pid is gone is stale and removed.
-// After 2 s of someone else holding it: Busy, exit 4. A run killed before it
-// removes its lock leaves a stale one, which the next run takes.
+// Run f holding the OS's lock on dir/name.lock (conventions: State): an
+// advisory lock the kernel releases when the process ends, so a crash leaves
+// nothing stale and no pid can be reused. The file itself stays. After 2 s of
+// another run holding it: Busy, exit 4.
 fn with_lock<T>(dir: &Path, name: &str, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
-    use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let lock = inside(dir, Path::new(&format!("{name}.lock")))?;
+    let path = inside(dir, Path::new(&format!("{name}.lock")))?;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| anyhow!("cannot lock {}: {}", path.display(), reason(&e)))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let mut stale = false;
     loop {
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&lock) {
-            Ok(mut file) => {
-                file.write_all(std::process::id().to_string().as_bytes())?;
-                break;
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => bail!("cannot lock {}: {}", lock.display(), reason(&e)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Busy(format!("{} is locked by another run; retry", dir.join(name).display())).into());
+            }
+            Err(std::fs::TryLockError::Error(e)) => bail!("cannot lock {}: {}", path.display(), reason(&e)),
         }
-        let owner: u32 = std::fs::read_to_string(&lock).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        if !stale && !(owner > 0 && running(owner)) {
-            stale = true; // once: a second stale lock means another run is racing
-            let _ = std::fs::remove_file(&lock);
-            continue;
-        }
-        if std::time::Instant::now() > deadline {
-            return Err(Busy(format!("{} is locked by pid {owner}; retry", dir.join(name).display())).into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let result = f();
-    let _ = std::fs::remove_file(&lock);
+    let _ = lock.unlock();
     result
 }
 
@@ -528,12 +517,15 @@ fn replace_file(dir: &Path, name: &str, data: &[u8]) -> anyhow::Result<()> {
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
     let temp = inside(dir, Path::new(&format!(".{name}.{}.{nonce:08x}.tmp", std::process::id())))?;
     let mode = target.metadata().map_or(0o600, |m| m.permissions().mode() & 0o777);
-    let result = std::fs::OpenOptions::new()
+    // Only a temp file this run created is ever removed.
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(mode)
         .open(&temp)
-        .and_then(|mut f| f.write_all(data))
+        .map_err(|e| anyhow!("cannot write {}: {}", target.display(), reason(&e)))?;
+    let result = file
+        .write_all(data)
         // The umask may have narrowed the mode.
         .and_then(|_| std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode)))
         .and_then(|_| std::fs::rename(&temp, &target));
@@ -541,6 +533,21 @@ fn replace_file(dir: &Path, name: &str, data: &[u8]) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&temp);
     }
     result.map_err(|e| anyhow!("cannot write {}: {}", target.display(), reason(&e)))
+}
+
+// The path as touch records it: the parent's real path and the name, so
+// forget finds it however the caller spells it (a symlinked directory,
+// macOS's /tmp). A parent that does not exist is taken as written.
+fn recorded(path: &Path) -> anyhow::Result<String> {
+    let full = lexical(&std::path::absolute(path)?);
+    let parent = full.parent().unwrap_or(Path::new("/"));
+    let parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+    Ok(match full.file_name() {
+        Some(name) => parent.join(name),
+        None => parent,
+    }
+    .display()
+    .to_string())
 }
 
 // The same definitions as --help, as data (rubric A10), in the shape every

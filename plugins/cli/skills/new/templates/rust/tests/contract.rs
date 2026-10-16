@@ -286,31 +286,70 @@ fn forget_rewrites_state_under_its_lock_keeps_unparsed_lines_and_the_mode() {
     assert_eq!(lines.len(), 2);
     assert!(lines[0].contains("/b\"") && lines[1] == "not json");
     assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
-    assert!(!home.path().join("state/history.jsonl.lock").exists());
     let again = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap().stdout);
     assert_eq!(again["changed"], false);
 }
 
 #[test]
-fn a_held_lock_is_busy_and_a_stale_one_is_taken() {
+fn a_held_lock_is_busy_and_a_left_lock_file_is_not() {
     let d = sandbox();
     let home = sandbox();
     cli_in(d.path(), home.path()).args(["touch", "a", "--yes"]).assert().success();
     let file = home.path().join("state/history.jsonl");
     let before = std::fs::read_to_string(&file).unwrap();
-    let mut owner = std::process::Command::new("sleep").arg("30").spawn().unwrap();
-    std::fs::write(home.path().join("state/history.jsonl.lock"), owner.id().to_string()).unwrap();
+    // Another run holding the OS lock: this test process.
+    let held = std::fs::OpenOptions::new().write(true).open(home.path().join("state/history.jsonl.lock")).unwrap();
+    held.lock().unwrap();
     let busy = cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap();
-    let _ = owner.kill();
-    let _ = owner.wait();
+    held.unlock().unwrap();
     assert_eq!(busy.status.code(), Some(4));
-    assert!(json(&busy.stdout)["error"].as_str().unwrap().contains("locked by pid"));
+    assert!(json(&busy.stdout)["error"].as_str().unwrap().contains("locked by another run"));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
-    std::fs::write(home.path().join("state/history.jsonl.lock"), "999999").unwrap();
+    // The file left behind, unlocked (as after a crash): nothing to wait for.
     let taken = cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap();
     assert!(taken.status.success());
     assert_eq!(json(&taken.stdout)["removed"], 1);
-    assert!(!home.path().join("state/history.jsonl.lock").exists());
+}
+
+#[test]
+fn concurrent_forget_and_touch_lose_nothing_and_revive_nothing() {
+    let d = sandbox();
+    let home = sandbox();
+    for i in 0..12 {
+        cli_in(d.path(), home.path()).args(["touch", &format!("p{i}"), "--yes"]).assert().success();
+    }
+    let runs: Vec<_> = (0..12)
+        .flat_map(|i| [vec!["forget".to_string(), format!("p{i}")], vec!["touch".to_string(), format!("n{i}")]])
+        .map(|args| {
+            let (cwd, home) = (d.path().to_path_buf(), home.path().to_path_buf());
+            std::thread::spawn(move || cli_in(&cwd, &home).args(&args).arg("--yes").output().unwrap())
+        })
+        .collect();
+    for r in runs {
+        let out = r.join().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let text = std::fs::read_to_string(home.path().join("state/history.jsonl")).unwrap();
+    let names: Vec<String> = text
+        .lines()
+        .map(|l| json(l.as_bytes())["path"].as_str().unwrap().rsplit('/').next().unwrap().to_string())
+        .collect();
+    let mut want: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+    let mut got = names.clone();
+    want.sort();
+    got.sort();
+    assert_eq!(got, want, "history: {text}");
+}
+
+#[test]
+fn forget_finds_a_path_however_it_is_spelled() {
+    let d = sandbox();
+    let home = sandbox();
+    std::fs::create_dir(d.path().join("real")).unwrap();
+    std::os::unix::fs::symlink(d.path().join("real"), d.path().join("link")).unwrap();
+    cli_in(d.path(), home.path()).args(["touch", "link/n", "--yes"]).assert().success();
+    let v = json(&cli_in(d.path(), home.path()).args(["forget", "link/n", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!(v["removed"], 1);
 }
 
 #[test]

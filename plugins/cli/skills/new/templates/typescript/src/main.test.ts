@@ -2,7 +2,6 @@
 // the CLI; run() is asynchronous, so the cases really do run concurrently.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { spawn as spawnAsync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -12,10 +11,11 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -301,20 +301,48 @@ describe("contract", { concurrency: true }, () => {
     await run(["touch", "a", "--yes"], { cwd, env });
     const file = join(home, "state", "history.jsonl");
     const before = readFileSync(file, "utf8");
-    // A live owner: a process that outlives the attempt.
-    const owner = spawnAsync("sleep", ["30"]);
-    writeFileSync(`${file}.lock`, String(owner.pid));
+    // Held: a fresh lock directory, as another run makes it.
+    mkdirSync(`${file}.lock`);
     const busy = await run(["forget", "a", "--yes", "--json"], { cwd, env });
-    owner.kill();
     assert.equal(busy.code, 4, busy.err);
-    assert.match(json(busy).error, /locked by pid/);
+    assert.match(json(busy).error, /locked by another run/);
     assert.equal(readFileSync(file, "utf8"), before);
-    // A dead owner: stale, removed, and the run goes ahead.
-    writeFileSync(`${file}.lock`, "999999");
+    // Left by a run that died: older than any run holds it, so taken over.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${file}.lock`, old, old);
     const taken = await run(["forget", "a", "--yes", "--json"], { cwd, env });
     assert.equal(taken.code, 0, taken.err);
     assert.equal(json(taken).removed, 1);
     assert.equal(existsSync(`${file}.lock`), false);
+  });
+
+  test("concurrent forget and touch lose nothing and revive nothing", async () => {
+    const cwd = sandbox();
+    const home = sandbox();
+    const env = { TOOL_HOME: home };
+    for (let i = 0; i < 12; i++) await run(["touch", `p${i}`, "--yes"], { cwd, env });
+    const cases = Array.from({ length: 12 }, (_, i) => [
+      ["forget", `p${i}`, "--yes"],
+      ["touch", `n${i}`, "--yes"],
+    ]).flat();
+    for (const [k, r] of (await runAll(cases, { cwd, env })).entries())
+      assert.equal(r.code, 0, `${cases[k].join(" ")}: ${r.err}`);
+    const names = readFileSync(join(home, "state", "history.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => basename(JSON.parse(l).path))
+      .sort();
+    assert.deepEqual(names, Array.from({ length: 12 }, (_, i) => `n${i}`).sort());
+  });
+
+  test("forget finds a path however it is spelled", async () => {
+    const cwd = sandbox();
+    const home = sandbox();
+    const env = { TOOL_HOME: home };
+    mkdirSync(join(cwd, "real"));
+    symlinkSync(join(cwd, "real"), join(cwd, "link"));
+    await run(["touch", "link/n", "--yes"], { cwd, env });
+    assert.equal(json(await run(["forget", "link/n", "--yes", "--json"], { cwd, env })).removed, 1);
   });
 
   test("describe lists every command, its args and flags as --help shows them", async () => {

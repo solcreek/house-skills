@@ -378,36 +378,78 @@ func TestForgetRewritesStateUnderItsLock(t *testing.T) {
 	if fi, _ := os.Stat(file); fi.Mode().Perm() != 0o640 {
 		t.Errorf("mode %v, want 0640", fi.Mode().Perm())
 	}
-	if exists(file + ".lock") {
-		t.Error("the lock was left behind")
-	}
 	if v := decode(t, runIn(t, dir, home, "forget", "a", "--yes", "--json").out); v["changed"] != false {
 		t.Errorf("rerun: %v", v)
 	}
 }
 
-func TestAHeldLockIsBusyAndAStaleOneIsTaken(t *testing.T) {
+func TestAHeldLockIsBusyAndALeftLockFileIsNot(t *testing.T) {
 	t.Parallel()
 	dir, home := t.TempDir(), t.TempDir()
 	runIn(t, dir, home, "touch", "a", "--yes")
 	file := filepath.Join(home, "state", "history.jsonl")
 	before, _ := os.ReadFile(file)
-	owner := exec.Command("sleep", "30")
-	must(t, owner.Start())
-	must(t, os.WriteFile(file+".lock", []byte(fmt.Sprint(owner.Process.Pid)), 0o600))
+	// Another run holding the OS lock: this test process.
+	held, err := os.OpenFile(file+".lock", os.O_RDWR, 0)
+	must(t, err)
+	if ok, err := tryLock(held); !ok || err != nil {
+		t.Fatalf("could not take the lock: %v", err)
+	}
 	r := runIn(t, dir, home, "forget", "a", "--yes", "--json")
-	owner.Process.Kill()
-	owner.Wait()
-	if e, _ := decode(t, r.out)["error"].(string); r.code != exitBusy || !strings.Contains(e, "locked by pid") {
+	unlock(held)
+	held.Close()
+	if e, _ := decode(t, r.out)["error"].(string); r.code != exitBusy || !strings.Contains(e, "locked by another run") {
 		t.Errorf("busy: exit %d, %q", r.code, r.out)
 	}
 	if after, _ := os.ReadFile(file); string(after) != string(before) {
 		t.Error("a busy run wrote")
 	}
-	must(t, os.WriteFile(file+".lock", []byte("999999"), 0o600))
+	// The file left behind, unlocked (as after a crash): nothing to wait for.
 	r = runIn(t, dir, home, "forget", "a", "--yes", "--json")
-	if r.code != 0 || decode(t, r.out)["removed"] != 1.0 || exists(file+".lock") {
-		t.Errorf("stale lock: exit %d, %q", r.code, r.out)
+	if r.code != 0 || decode(t, r.out)["removed"] != 1.0 {
+		t.Errorf("left lock file: exit %d, %q", r.code, r.out)
+	}
+}
+
+func TestConcurrentForgetAndTouchLoseNothingAndReviveNothing(t *testing.T) {
+	t.Parallel()
+	dir, home := t.TempDir(), t.TempDir()
+	for i := range 12 {
+		runIn(t, dir, home, "touch", fmt.Sprintf("p%d", i), "--yes")
+	}
+	done := make(chan result)
+	for i := range 12 {
+		go func() { done <- runIn(t, dir, home, "forget", fmt.Sprintf("p%d", i), "--yes") }()
+		go func() { done <- runIn(t, dir, home, "touch", fmt.Sprintf("n%d", i), "--yes") }()
+	}
+	for range 24 {
+		if r := <-done; r.code != 0 {
+			t.Errorf("exit %d: %s", r.code, r.err)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "state", "history.jsonl"))
+	var got, want []string
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		got = append(got, filepath.Base(decode(t, l)["path"].(string)))
+	}
+	for i := range 12 {
+		want = append(want, fmt.Sprintf("n%d", i))
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("history %v, want %v", got, want)
+	}
+}
+
+func TestForgetFindsAPathHoweverItIsSpelled(t *testing.T) {
+	t.Parallel()
+	dir, home := t.TempDir(), t.TempDir()
+	must(t, os.Mkdir(filepath.Join(dir, "real"), 0o755))
+	must(t, os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")))
+	runIn(t, dir, home, "touch", "link/n", "--yes")
+	if v := decode(t, runIn(t, dir, home, "forget", "link/n", "--yes", "--json").out); v["removed"] != 1.0 {
+		t.Errorf("forget link/n: %v", v)
 	}
 }
 

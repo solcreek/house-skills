@@ -246,11 +246,17 @@ func newRoot() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			target, err := filepath.Abs(path)
+			target, err := recorded(path)
 			if err != nil {
 				return err
 			}
+			// A symlinked history is refused whether or not this is a dry run.
 			file := filepath.Join(state, "history.jsonl")
+			if _, err := os.Stat(state); err == nil {
+				if file, err = inside(state, "history.jsonl"); err != nil {
+					return err
+				}
+			}
 			edit := func() (int, error) {
 				b, err := os.ReadFile(file)
 				if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -263,8 +269,9 @@ func newRoot() *cobra.Command {
 						continue
 					}
 					lines = append(lines, l)
-					var entry struct{ Path *string }
-					if json.Unmarshal([]byte(l), &entry) != nil || entry.Path == nil || *entry.Path != target {
+					// Exact keys: a struct would also match "Path".
+					var entry map[string]any
+					if json.Unmarshal([]byte(l), &entry) != nil || entry["path"] != target {
 						kept = append(kept, l)
 					}
 				}
@@ -499,55 +506,53 @@ func appendState(name string, entry any) bool {
 	return true
 }
 
-// ours is what to remove if the run is interrupted: a lock or a temp file
-// it made (rubric E5). main's signal handler empties it.
+// ours is what to remove if the run is interrupted: a temp file it made
+// (rubric E5). main's signal handler empties it; the kernel drops its lock.
 var ours sync.Map
 
-// running is whether pid is a live process: signal 0 checks without
-// sending anything.
-func running(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, os.ErrPermission)
-}
-
-// withLock runs fn holding dir/name.lock (conventions: State). The lock is
-// created only if absent and holds our pid; one whose pid is gone is stale
-// and removed. After 2 s of someone else holding it: busy, exit 4.
+// withLock runs fn holding the OS's lock on dir/name.lock (conventions:
+// State): flock, or LockFileEx on Windows (lock_*.go). The kernel releases it
+// when the process ends, so a crash leaves nothing stale and no pid can be
+// reused. The file itself stays. After 2 s of another run holding it: busy,
+// exit 4.
 func withLock(dir, name string, fn func() error) error {
-	lock, err := inside(dir, name+".lock")
+	path, err := inside(dir, name+".lock")
 	if err != nil {
 		return err
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for stale := false; ; {
-		f, err := os.OpenFile(lock, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
-			fmt.Fprint(f, os.Getpid())
-			f.Close()
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("cannot lock %s: %s", path, cause(err))
+	}
+	defer f.Close()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		ok, err := tryLock(f)
+		if err != nil {
+			return fmt.Errorf("cannot lock %s: %s", path, cause(err))
+		}
+		if ok {
 			break
 		}
-		if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("cannot lock %s: %s", lock, cause(err))
-		}
-		b, _ := os.ReadFile(lock)
-		owner, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-		if !stale && !(owner > 0 && running(owner)) {
-			stale = true // once: a second stale lock means another run is racing
-			os.Remove(lock)
-			continue
-		}
 		if time.Now().After(deadline) {
-			return busyError{fmt.Errorf("%s is locked by pid %d; retry", filepath.Join(dir, name), owner)}
+			return busyError{fmt.Errorf("%s is locked by another run; retry", filepath.Join(dir, name))}
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	ours.Store(lock, true)
-	defer func() { os.Remove(lock); ours.Delete(lock) }()
+	defer unlock(f)
 	return fn()
+}
+
+// recorded is a path as touch records it: the parent's real path and the
+// name, so forget finds it however the caller spells it (a symlinked
+// directory, macOS's /tmp). A parent that does not exist is taken as written.
+func recorded(path string) (string, error) {
+	full, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(full)); err == nil {
+		return filepath.Join(parent, filepath.Base(full)), nil
+	}
+	return full, nil
 }
 
 // replaceFile replaces dir/name with data (conventions: State): a uniquely
@@ -707,7 +712,7 @@ func main() {
 	// cobra runs only the nearest PersistentPreRunE: a subcommand defining its
 	// own would silently skip the root's mutating guard. This runs them all.
 	cobra.EnableTraverseRunHooks = true
-	// Ctrl-C removes a lock or temp file this run made (rubric E5).
+	// Ctrl-C removes a temp file this run made (rubric E5).
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	go func() {
