@@ -29,7 +29,7 @@ check() {
 status() { echo "(.checks[] | select(.id == \"$1\") | .status) == \"$2\""; }
 
 # A tool that follows the conventions passes every check.
-check "good: all pass" 0 '.summary == {pass: 8}' -- "$fx/good"
+check "good: all pass" 0 '.summary == {pass: 9}' -- "$fx/good"
 check "good: help on stdout" 0 '.checks[0].run.stdout | startswith("usage: good")' -- "$fx/good"
 check "good: unknown flag exit kept" 0 '.checks[] | select(.id == "unknown-flag") | .run.exit == 2' -- "$fx/good"
 check "good: argv recorded as data" 0 '.checks[0].run.argv[1] == "--help"' -- "$fx/good"
@@ -43,6 +43,8 @@ check "bad: --version without a number" 1 \
   '.checks[] | select(.id == "version") | .status == "fail" and (.detail | test("no version number"))' -- "$fx/bad"
 check "bad: unknown flag ignored" 1 \
   '.checks[] | select(.id == "unknown-flag") | .detail | test("exit 0 on an unknown flag")' -- "$fx/bad"
+check "bad: unknown subcommand runs the action" 1 \
+  '.checks[] | select(.id == "unknown-command") | .detail | test("exit 0 on an unknown subcommand")' -- "$fx/bad"
 check "bad: colour into a pipe" 1 "$(status no-color-piped fail)" -- "$fx/bad"
 check "bad: colour despite NO_COLOR" 1 "$(status no-color-env fail)" -- "$fx/bad"
 check "bad: no help to measure" 1 "$(status help-width skip)" -- "$fx/bad"
@@ -52,6 +54,8 @@ check "bad: nothing to time" 1 "$(status startup skip)" -- "$fx/bad"
 FORCE_COLOR=1 CLICOLOR_FORCE=1 check "good: FORCE_COLOR stripped" 0 "$(status no-color-piped pass)" -- "$fx/good"
 
 # Skips are reported, not dropped.
+check "skip unknown-command for a positional" 0 \
+  '[.checks[] | select(.status == "skip") | .id] == ["unknown-command"]' --skip unknown-command -- "$fx/good"
 check "skip is recorded" 0 \
   '[.checks[] | select(.status == "skip") | .id] == ["unknown-flag"]' --skip unknown-flag -- "$fx/good"
 
@@ -67,7 +71,7 @@ else
 fi
 
 # Arguments before the flag select a subcommand.
-check "sub: probes the subcommand" 0 '.summary == {pass: 7, skip: 1}' -- "$fx/sub" wt
+check "sub: probes the subcommand" 0 '.summary == {pass: 8, skip: 1}' -- "$fx/sub" wt
 check "sub: --version not asked of it" 0 "$(status version skip)" -- "$fx/sub" wt
 check "sub: --version skip by caller wins" 0 \
   '[.checks[] | select(.id == "version") | .detail] == ["skipped by caller"]' --skip version -- "$fx/sub" wt
