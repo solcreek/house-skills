@@ -8,8 +8,9 @@
 # it is safe (read-only and local), or have the user's yes. Checks:
 #   json-valid      stdout is one JSON document, or with --lines (for a
 #                   command documented as NDJSON) one JSON value per line
-#   json-error      on a non-zero exit, the document has an "error" string
-#                   (rubric A5); skipped on exit 0
+#   json-error      on a non-zero exit, the document has a non-empty "error"
+#                   string (rubric A5), or on exit 3 (partial, conventions)
+#                   a "problems" array; skipped on exit 0
 #   exit            with --expect-exit N, the exit code is N
 #   no-color-piped  no escape codes on stdout or stderr
 # --env, --offline and --brief as in probe. Same isolation as probe: stdin at EOF, an empty temporary directory unless
@@ -79,10 +80,15 @@ else
 fi
 if [ "$exit" = 0 ]; then
   record json-error skip "exit 0"
+elif [ "$exit" = 3 ] && jq -se 'length == 1 and (.[0] | type == "object")
+    and (.[0].problems | type == "array" and length > 0)
+    and all(.[0].problems[]; type == "object" and (.input | type == "string")
+                             and (.error | type == "string" and length > 0))' "$tmp/json.out" > /dev/null 2>&1; then
+  record json-error pass "exit 3 (partial) with problems"
 elif jq -se 'length == 1 and (.[0] | type == "object") and (.[0].error | type == "string" and length > 0)' "$tmp/json.out" > /dev/null 2>&1; then
   record json-error pass "exit $exit with an error string"
 else
-  record json-error fail "exit $exit without a non-empty {\"error\": \"...\"} on stdout"
+  record json-error fail "exit $exit without a non-empty {\"error\": \"...\"} on stdout$( [ "$exit" = 3 ] && echo ", or a partial result's problems")"
 fi
 if [ -n "$expect" ]; then
   if [ "$exit" = "$expect" ]; then record exit pass "exit $exit"

@@ -1,3 +1,21 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec node --no-warnings "$(dirname "${BASH_SOURCE[0]}")/../src/main.ts" "$@"
+#!/usr/bin/env -S node --no-warnings
+// The entry point: turn on Node's compile cache in this tool's own cache
+// directory (never the shared temp directory, where another user could
+// plant code, nor the current directory when there is no home), then load
+// the TypeScript source, stripped of types by Node.
+import { enableCompileCache } from "node:module";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+
+try {
+  const { TOOL_HOME, XDG_CACHE_HOME } = process.env;
+  const base = TOOL_HOME
+    ? join(resolve(TOOL_HOME), "cache")
+    : XDG_CACHE_HOME && isAbsolute(XDG_CACHE_HOME)
+      ? join(XDG_CACHE_HOME, "tool")
+      : isAbsolute(homedir())
+        ? join(homedir(), ".cache", "tool")
+        : "";
+  if (base) enableCompileCache?.(join(base, "node-compile-cache"));
+} catch {} // no cache is only slower
+await import("../src/main.ts");

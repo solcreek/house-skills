@@ -6,15 +6,19 @@ use predicates::prelude::*;
 use serde_json::Value;
 
 // stdin at EOF and a timeout, so a command that prompts fails instead of
-// hanging; TOOL_HOME isolates any state (conventions).
-fn cli(cwd: &Path) -> Command {
+// hanging; TOOL_HOME isolates state (conventions).
+fn cli_in(cwd: &Path, home: &Path) -> Command {
     let mut c = Command::cargo_bin("tool").unwrap();
     c.current_dir(cwd)
         .env("NO_COLOR", "1")
-        .env("TOOL_HOME", cwd.join(".home"))
+        .env("TOOL_HOME", home)
         .write_stdin("")
         .timeout(std::time::Duration::from_secs(10));
     c
+}
+
+fn cli(cwd: &Path) -> Command {
+    cli_in(cwd, &cwd.join(".home"))
 }
 
 fn sandbox() -> tempfile::TempDir {
@@ -25,21 +29,39 @@ fn json(out: &[u8]) -> Value {
     serde_json::from_slice(out).unwrap()
 }
 
+// A directory with three files of different sizes.
+fn tree() -> tempfile::TempDir {
+    let d = sandbox();
+    std::fs::create_dir(d.path().join("sub")).unwrap();
+    std::fs::write(d.path().join("a"), "x".repeat(30)).unwrap();
+    std::fs::write(d.path().join("b"), "x".repeat(20)).unwrap();
+    std::fs::write(d.path().join("sub/c"), "x".repeat(10)).unwrap();
+    d
+}
+
 #[test]
 fn help_goes_to_stdout_and_exits_0() {
     let d = sandbox();
-    for args in [&["--help"][..], &["-h"], &["help", "touch"], &["greet", "--help"], &["touch", "-h"], &["touch", "x", "--help"]] {
+    let cases: [&[&str]; 8] = [
+        &[], &["--help"], &["-h"], &["help", "touch"], &["files", "--help"], &["touch", "-h"], &["touch", "x", "--help"], &["describe", "-h"],
+    ];
+    for args in cases {
         cli(d.path()).args(args).assert().success().stdout(predicate::str::contains("Usage")).stderr("");
     }
     assert!(!d.path().join("x").exists());
+    // Exit codes on every help page (rubric E4).
+    cli(d.path()).args(["files", "-h"]).assert().stdout(predicate::str::contains("3 partial"));
 }
 
 #[test]
 fn usage_errors_exit_2() {
     let d = sandbox();
-    let cases: [&[&str]; 9] = [
-        &["--zz"], &["nope"], &["greet"], &["greet", "Ada", "Bob"], &["greet", "Ada", "--zz"],
-        &["describe", "zz"], &["greet", "A\u{7}da"], &["help", "zz"], &["touch", "", "--yes"],
+    let cases: [&[&str]; 16] = [
+        &["--zz"], &["nope"], &["help", "zz"], &["describe", "zz"],
+        &["files", "a", "b"], &["files", "--zz"], &["files", "--limit", "x"], &["files", "--limit=-1"], &["files", "A\u{7}"],
+        &["files", "--limit", "+2"], &["files", "--limit", "0x3"], &["files", "--limit", "1_0"],
+        // A mutating command gets --dry-run, or the missing-flag check would answer first.
+        &["touch", "--dry-run"], &["touch", "a", "b", "--dry-run"], &["touch", "", "--dry-run"], &["touch", "x", "--dry-run", "--zz"],
     ];
     for args in cases {
         cli(d.path()).args(args).assert().code(2).stdout("").stderr(predicate::str::contains("--help"));
@@ -47,17 +69,90 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
-fn json_is_one_document_failures_included() {
-    let d = sandbox();
-    let out = cli(d.path()).args(["greet", "Ada", "--json"]).output().unwrap();
-    assert_eq!(json(&out.stdout)["greeting"], "hello, Ada");
-    let out = cli(d.path()).args(["--json", "greet", "Ada"]).output().unwrap();
-    assert_eq!(json(&out.stdout)["greeting"], "hello, Ada");
-    for args in [&["greet", "--json"][..], &["greet", "--zz", "--json"]] {
+fn json_is_one_document_before_or_after_the_command_failures_included() {
+    let d = tree();
+    let after = cli(d.path()).args(["files", "--json"]).output().unwrap();
+    let before = cli(d.path()).args(["--json", "files"]).output().unwrap();
+    assert_eq!(json(&after.stdout), json(&before.stdout));
+    for args in [&["files", "a", "b", "--json"][..], &["files", "--zz", "--json"], &["touch", "x", "--json"]] {
         let out = cli(d.path()).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2));
         assert_eq!(json(&out.stdout)["usage"], true);
     }
+    // The usage message under --json names what is missing.
+    let out = cli(d.path()).args(["touch", "x", "--json"]).output().unwrap();
+    assert!(json(&out.stdout)["error"].as_str().unwrap().contains("--dry-run"));
+}
+
+#[test]
+fn a_list_is_capped_says_so_on_stderr_and_has_the_list_shape() {
+    let d = tree();
+    let out = cli(d.path()).args(["files", "--limit", "2", "--json"]).output().unwrap();
+    let v = json(&out.stdout);
+    assert_eq!((v["total"].as_u64(), v["shown"].as_u64(), v["truncated"].as_bool()), (Some(3), Some(2), Some(true)));
+    let paths: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["a", "b"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("2 of 3 shown; --limit 0 for all"));
+    let all = cli(d.path()).args(["files", "--limit", "0", "--json"]).output().unwrap();
+    assert_eq!((json(&all.stdout)["truncated"].as_bool(), all.stderr.is_empty()), (Some(false), true));
+    cli(d.path()).args(["files", "--limit", "1"]).assert().stdout("30\ta\n");
+}
+
+#[test]
+fn a_missing_input_fails_naming_it_and_an_unreadable_part_is_partial() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tree();
+    let out = cli(d.path()).args(["files", "nowhere", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(json(&out.stdout)["error"].as_str().unwrap().contains("no such directory"));
+    let out = cli(d.path()).args(["files", "a", "--json"]).output().unwrap();
+    assert!(json(&out.stdout)["error"].as_str().unwrap().contains("not a directory"));
+    if is_root() {
+        return; // root reads everything
+    }
+    let sub = d.path().join("sub");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = cli(d.path()).args(["files", "--json"]).output().unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v = json(&out.stdout);
+    assert_eq!(v["problems"], serde_json::json!([{ "input": "sub", "error": "permission denied" }]));
+    assert_eq!(v["total"], 2); // the rest is still there
+    // Nothing readable at all is a failure, not a partial result.
+    let root = d.path().to_path_buf();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let elsewhere = sandbox();
+    let out = cli(elsewhere.path()).args(["files", root.to_str().unwrap(), "--json"]).output().unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(json(&out.stdout)["error"].as_str().unwrap().contains("permission denied"));
+}
+
+#[test]
+fn ties_sort_by_bytes_a_symlinked_dir_lists_and_the_home_is_skipped() {
+    let d = sandbox();
+    for n in ["b2", "B1", "a", "é", "Z", "😀", "Ａ"] {
+        std::fs::write(d.path().join(n), "x").unwrap();
+    }
+    let v = json(&cli(d.path()).args(["files", "--json"]).output().unwrap().stdout);
+    let paths: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["B1", "Z", "a", "b2", "é", "Ａ", "😀"]);
+    let parent = sandbox();
+    std::os::unix::fs::symlink(d.path(), parent.path().join("link")).unwrap();
+    let v = json(&cli(parent.path()).args(["files", "link", "--json"]).output().unwrap().stdout);
+    assert_eq!(v["total"], 7);
+    // A relative TOOL_HOME, with a file directly under it, is skipped whole.
+    let home = Path::new(".home");
+    cli_in(d.path(), home).args(["touch", "made", "--yes"]).assert().success();
+    assert!(d.path().join(".home/state/history.jsonl").exists());
+    std::fs::write(d.path().join(".home/extra"), "x").unwrap();
+    let v = json(&cli_in(d.path(), &home).args(["files", "--json"]).output().unwrap().stdout);
+    assert!(v["items"].as_array().unwrap().iter().all(|i| !i["path"].as_str().unwrap().starts_with(".home")));
+}
+
+// Root reads and writes everything, so permission tests mean nothing there.
+fn is_root() -> bool {
+    std::process::Command::new("id").arg("-u").output().is_ok_and(|o| o.stdout.starts_with(b"0\n"))
 }
 
 #[test]
@@ -70,17 +165,53 @@ fn mutating_needs_exactly_one_of_dry_run_and_yes() {
 }
 
 #[test]
-fn dry_run_changes_nothing_yes_applies_rerun_succeeds() {
+fn dry_run_changes_nothing_yes_applies_and_records_state_rerun_succeeds() {
     let d = sandbox();
-    let dry = json(&cli(d.path()).args(["touch", "x", "--dry-run", "--json"]).output().unwrap().stdout);
+    let home = sandbox();
+    let dry = json(&cli_in(d.path(), home.path()).args(["touch", "x", "--dry-run", "--json"]).output().unwrap().stdout);
     assert_eq!((dry["changed"].as_bool(), dry["dryRun"].as_bool()), (Some(true), Some(true)));
-    assert!(!d.path().join("x").exists());
-    let yes = json(&cli(d.path()).args(["touch", "x", "--yes", "--json"]).output().unwrap().stdout);
-    assert_eq!(yes["changed"], true);
+    assert!(!d.path().join("x").exists() && !home.path().join("state").exists());
+    let yes = json(&cli_in(d.path(), home.path()).args(["touch", "x", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!((yes["changed"].as_bool(), yes["recorded"].as_bool()), (Some(true), Some(true)));
     assert!(d.path().join("x").exists());
-    let again = cli(d.path()).args(["touch", "x", "--yes", "--json"]).output().unwrap();
+    let history = std::fs::read_to_string(home.path().join("state/history.jsonl")).unwrap();
+    assert_eq!(history, format!("{}\n", serde_json::json!({ "path": yes["path"] })));
+    let again = cli_in(d.path(), home.path()).args(["touch", "x", "--yes", "--json"]).output().unwrap();
     assert!(again.status.success());
-    assert_eq!(json(&again.stdout)["changed"], false);
+    assert_eq!((json(&again.stdout)["changed"].as_bool(), json(&again.stdout)["recorded"].as_bool()), (Some(false), Some(false)));
+}
+
+#[test]
+fn state_survives_concurrent_runs_and_corruption_and_a_failed_record_warns() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = sandbox();
+    let home = sandbox();
+    let state = home.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::write(state.join("history.jsonl"), "not json\n").unwrap();
+    let runs: Vec<_> = (0..12)
+        .map(|i| {
+            let (cwd, home) = (d.path().to_path_buf(), home.path().to_path_buf());
+            std::thread::spawn(move || cli_in(&cwd, &home).args(["touch", &format!("f{i}"), "--yes"]).output().unwrap())
+        })
+        .collect();
+    for r in runs {
+        assert!(r.join().unwrap().status.success());
+    }
+    let lines: Vec<String> = std::fs::read_to_string(state.join("history.jsonl")).unwrap().lines().map(String::from).collect();
+    assert_eq!(lines[0], "not json"); // never rewritten
+    assert_eq!(lines.len(), 13); // no run lost another's line
+    if is_root() {
+        return;
+    }
+    let file = state.join("history.jsonl");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let out = cli_in(d.path(), home.path()).args(["touch", "late", "--yes", "--json"]).output().unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(out.status.success());
+    let v = json(&out.stdout);
+    assert_eq!((v["changed"].as_bool(), v["recorded"].as_bool()), (Some(true), Some(false)));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("warning: not recorded"));
 }
 
 #[test]
@@ -120,6 +251,9 @@ fn absolute_path_inside_is_fine() {
 #[test]
 fn a_failed_write_names_the_file() {
     use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        return; // root writes anywhere
+    }
     let d = sandbox();
     let ro = d.path().join("ro");
     std::fs::create_dir(&ro).unwrap();
@@ -131,21 +265,25 @@ fn a_failed_write_names_the_file() {
 }
 
 #[test]
-fn describe_lists_every_command_with_its_flags() {
+fn describe_lists_every_command_its_args_and_flags() {
     let d = sandbox();
     let v = json(&cli(d.path()).arg("describe").output().unwrap().stdout);
-    assert_eq!(v["exitCodes"]["usage"], 2);
+    assert_eq!(v["exitCodes"], serde_json::json!({ "ok": 0, "failed": 1, "usage": 2, "partial": 3 }));
     let names = |c: &Value| -> Vec<String> {
         let mut n: Vec<String> = c["flags"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         n.sort();
         n
     };
-    assert!(names(&v).contains(&"version".to_string()) && names(&v).contains(&"json".to_string()));
+    assert_eq!(names(&v), ["help", "json", "version"]);
     let mut keys: Vec<&String> = v.as_object().unwrap().keys().collect();
     keys.sort();
     assert_eq!(keys, ["commands", "exitCodes", "flags", "name", "summary", "version"]);
     let cmd = |name: &str| v["commands"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap().clone();
-    assert_eq!(names(&cmd("greet")), ["help", "json"]);
+    assert_eq!(names(&cmd("files")), ["help", "json", "limit"]);
+    assert_eq!(cmd("files")["args"], serde_json::json!([{ "name": "DIR", "required": false, "default": "." }]));
+    let limit = cmd("files")["flags"].as_array().unwrap().iter().find(|f| f["name"] == "limit").unwrap().clone();
+    assert_eq!((limit["type"].as_str(), limit["default"].as_str()), (Some("integer"), Some("20")));
     assert_eq!(names(&cmd("touch")), ["dry-run", "help", "json", "yes"]);
     assert_eq!(cmd("touch")["mutates"], true);
+    assert!(!cmd("files")["examples"].as_array().unwrap().is_empty());
 }

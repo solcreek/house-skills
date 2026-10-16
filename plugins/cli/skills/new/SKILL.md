@@ -80,18 +80,26 @@ runner. Keep the contract tests.
 
 ## 4. Replace the example
 
-The template has two example commands: `greet`, which only reports, and
-`touch`, which mutates and writes a path. Use them as the patterns for your
-commands, then delete them. Keep:
+The template has two example commands, each a pattern to copy:
+
+- `files [DIR] [--limit N]` reports: an optional positional with a default,
+  an integer flag, the capped list shape with its stderr note, a missing
+  input as failed, and unreadable parts as a partial result (exit 3).
+- `touch PATH` mutates: `--dry-run`/`--yes`, an output path checked by
+  `inside`, a rerun that changes nothing, and a line appended to its state
+  under `home("state")`, where a failure to record is only a warning.
+
+Model your commands on them, then delete them. Keep:
 
 - the **help check before `run`**, the positional-count check and the
   `--dry-run`/`--yes` check in TypeScript's `main`, and the usage-error
   mapping in Go. The libraries do none of these for you;
 - the mutating pattern: `mutates: true` (TypeScript), flattening `Change`
   (Rust), or `mutating(cmd)` plus `change(cmd)` (Go);
-- the path check (`inside`) for any path the tool writes, and creating
-  with create-only-if-absent; to overwrite an existing file, write a temp
-  file beside it and rename over it, never open the path for writing;
+- the helpers: `inside` for any path the tool writes (create with
+  create-only-if-absent), `home` for config, cache and state, `homes` so a
+  walk skips them, `appendState` for history-like state, `capped` for every
+  list, and `reason` for an error's words without its path;
 - `describe`, generated from the same definitions as help, in the shape of
   [references/describe.md](references/describe.md) shared by all three
   templates;
@@ -102,7 +110,10 @@ commands, then delete them. Keep:
   each command add a test that it rejects an unknown flag and extra
   arguments, and that `--json` output is a single document. For each
   mutating command, test that it neither acts nor prompts without `--yes`,
-  that `--dry-run` changes nothing, and that a rerun succeeds.
+  that `--dry-run` changes nothing, and that a rerun succeeds. Give a
+  mutating command `--dry-run` in its other tests (extra arguments, unknown
+  flags): without it, the missing-flag check answers first and the test
+  passes for the wrong reason.
 
 ## 5. Verify
 
@@ -113,8 +124,13 @@ every command:
     $A/probe -- BINARY COMMAND                 # add --skip unknown-command when
                                                # COMMAND takes a free positional
     $A/run-json -- BINARY describe
-    $A/run-json --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
+    $A/run-json --expect-exit 0 --cwd FIXTURE --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
     $A/run-json --expect-exit 2 -- BINARY MUTATING … --json   # no --yes: refused, as JSON
+
+Give every `run-json` call an `--expect-exit`: without it, a failure that
+prints a well-formed error passes. Point commands that read files at a
+fixture with some content (`--cwd`, or an absolute path): in the default
+empty directory they find nothing and pass trivially.
 
 `run-json` runs the command, so it asks for approval: run it only on
 read-only commands, and on mutating ones only with `--dry-run`. Add

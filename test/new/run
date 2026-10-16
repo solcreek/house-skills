@@ -66,38 +66,59 @@ for stack in typescript rust go; do
   if [ -n "$build" ] && ! (cd "$d" && $build) > "$tmp/log" 2>&1; then no "$stack build"; tail -20 "$tmp/log"; continue; fi
   if (cd "$d" && $test) > "$tmp/log" 2>&1; then ok; else no "$stack contract tests"; tail -30 "$tmp/log"; fi
 
-  # greet and touch take a free positional, so an unknown subcommand there
+  # files and touch take a free positional, so an unknown subcommand there
   # is an argument; describe takes none, so it gets every check.
-  for level in "top" "greet --skip unknown-command" "touch --skip unknown-command" "describe"; do
+  for level in "top" "files --skip unknown-command" "touch --skip unknown-command" "describe"; do
     set -- $level
     lvl=$1; shift
     [ "$lvl" = top ] && lvl=
-    # startup is timing: on a loaded machine it can miss once. Retry only when
-    # it is the sole failure.
-    # shellcheck disable=SC2086
-    if "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1 ||
-       { jq -e '[.checks[] | select(.status == "fail") | .id] == ["startup"]' "$tmp/p" > /dev/null 2>&1 &&
-         "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1; }; then ok
+    # startup is timing: on a loaded machine (load above the core count) Node
+    # alone takes 200 ms. Retry, up to three runs, only while it is the sole
+    # failure.
+    tries=0
+    while :; do
+      got=0
+      # shellcheck disable=SC2086
+      "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1 || got=$?
+      tries=$((tries + 1))
+      [ "$got" = 1 ] && [ "$tries" -lt 3 ] &&
+        jq -e '[.checks[] | select(.status == "fail") | .id] == ["startup"]' "$tmp/p" > /dev/null 2>&1 || break
+    done
+    # Only the probe's own exit 0 is a pass: exit 2 (could not probe) has no
+    # summary at all.
+    if [ "$got" = 0 ]; then ok
     else no "$stack probe '$level': $(jq -c '[.checks[]? | select(.status == "fail") | [.id, .detail]]' "$tmp/p" 2>/dev/null || cat "$tmp/p")"; fi
   done
-  if "$runjson" -- "$bin" greet Ada --json > "$tmp/p" 2>&1; then ok; else no "$stack greet --json"; fi
+  # A list against a fixture with content: in the empty default directory it
+  # would pass trivially.
+  rm -rf "$tmp/fx" && mkdir -p "$tmp/fx/sub" && printf 'abc' > "$tmp/fx/a" && printf 'a' > "$tmp/fx/sub/b"
+  if "$runjson" --expect-exit 0 --cwd "$tmp/fx" -- "$bin" files --limit 1 --json > "$tmp/p" 2>&1 &&
+     jq -e '.checks[0].run.stdout | fromjson | .total == 2 and .shown == 1 and .truncated and .items[0].path == "a"' "$tmp/p" > /dev/null
+  then ok; else no "$stack files --json: $(cat "$tmp/p")"; fi
+  if "$runjson" --expect-exit 1 -- "$bin" files nowhere --json > "$tmp/p" 2>&1; then ok; else no "$stack files nowhere: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # A mutating command under --dry-run is read-only; its failures are JSON too.
   rm -rf "$tmp/dry" && mkdir "$tmp/dry"
-  if "$runjson" --cwd "$tmp/dry" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1 && [ -z "$(ls -A "$tmp/dry")" ]; then ok
+  if "$runjson" --expect-exit 0 --cwd "$tmp/dry" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1 && [ -z "$(ls -A "$tmp/dry")" ]; then ok
   else no "$stack touch --dry-run: $(cat "$tmp/p"; ls -A "$tmp/dry")"; fi
   if "$runjson" --expect-exit 2 -- "$bin" touch x --json > "$tmp/p" 2>&1; then ok; else no "$stack touch without --yes: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   if "$runjson" --expect-exit 1 -- "$bin" touch ../x --yes --json > "$tmp/p" 2>&1; then ok; else no "$stack touch ../x: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # describe: one document, in the shared shape (references/describe.md).
   # run-json keeps only 2000 bytes of stdout, so read the whole document directly.
-  if "$runjson" -- "$bin" describe > "$tmp/p" 2>&1 && "$bin" describe > "$tmp/d" &&
+  if "$runjson" --expect-exit 0 -- "$bin" describe > "$tmp/p" 2>&1 && "$bin" describe > "$tmp/d" &&
      jq -e '
        (.name == "my-cli") and (.version | type == "string") and (.summary | type == "string")
-       and .exitCodes.ok == 0 and .exitCodes.failed == 1 and .exitCodes.usage == 2
-       and ([.flags[].name] | index("version") != null)
-       and all(.flags[], .commands[].flags[]; has("name") and has("short") and has("takesValue") and has("default") and has("description"))
-       and all(.commands[]; (.mutates | type == "boolean") and (.summary | type == "string") and (.commands | type == "array"))
-       and (.commands[] | select(.name == "greet") | (.usage | test("greet")) and .mutates == false
-            and ([.flags[].name] | index("json") != null and index("help") != null))
+       and .exitCodes == {ok: 0, failed: 1, usage: 2, partial: 3}
+       and ([.flags[].name] | sort == ["help", "json", "version"])
+       and (keys == ["commands", "exitCodes", "flags", "name", "summary", "version"])
+       and all(.flags[], .commands[].flags[]; keys == ["default", "description", "name", "short", "type"]
+               and (.type | IN("boolean", "integer", "string")))
+       and all(.commands[]; keys == ["args", "commands", "examples", "flags", "mutates", "name", "summary", "usage"]
+               and (.mutates | type == "boolean") and (.examples | length > 0)
+               and all(.args[]; keys == ["default", "name", "required"]))
+       and (.commands[] | select(.name == "files") | (.usage | test("files")) and .mutates == false
+            and .args == [{name: "DIR", required: false, default: "."}]
+            and (.flags[] | select(.name == "limit") | .type == "integer" and .default == "20")
+            and ([.flags[].name] | sort == ["help", "json", "limit"]))
        and (.commands[] | select(.name == "touch") | .mutates
             and ([.flags[].name] | index("dry-run") != null and index("yes") != null))' "$tmp/d" > /dev/null; then ok
   else no "$stack describe shape: $(head -c 600 "$tmp/d")"; fi

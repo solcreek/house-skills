@@ -17,8 +17,19 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
 ## Other notes
 
 - **Mutating commands**: `mutating(cmd)` adds `--dry-run` and `--yes` and
-  marks it for `describe`. The command's `RunE` calls `change(cmd)` first,
-  which returns a usage error unless exactly one is set.
+  marks it; the root's `PersistentPreRunE` then refuses it unless exactly
+  one is set, so no command can forget. `RunE` calls `change(cmd)` to learn
+  which.
+- **Positionals and examples in `describe`** come from `Use` (`files [DIR]`:
+  brackets mean optional), an annotation `default.DIR` for a default, and
+  the `Example` field, one example per line.
+- **Exit 3**: return `partialError{…}` after printing the result; `main`
+  exits 3 without printing anything more. Exit codes are appended to every
+  help page through the root's help template.
+- **Integer flags** use `wholeNumber` (`flags.Var(&n, "limit", "… \`N\` …")`),
+  never pflag's `Uint`/`Int`, which read `010` as octal and take `0x3` and
+  `1_0`. Its `Type()` is `uint`, so `describe` reports `integer`; the
+  backquoted `N` is the placeholder in help.
 - **Help on stdout**: `main` calls `root.SetOut(os.Stdout)`. Write command
   output with `cmd.OutOrStdout()` so tests can capture it.
 - **`--json` is a persistent flag** on the root, so every command has it.
@@ -27,7 +38,7 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
   first and reads `LocalFlags` plus `InheritedFlags`: `Flags()` alone misses
   `--help`, `--version` and the persistent `--json` on every command that is
   not running.
-- **`--json` on a failure**: pflag stops at a bad flag, so `greet --zz --json`
+- **`--json` on a failure**: pflag stops at a bad flag, so `files --zz --json`
   never sets `asJSON`. `main` also looks for `--json` in `os.Args` on the
   error path; keep that.
 - **Colour**: `fatih/color` honours `NO_COLOR` and the terminal. cobra's

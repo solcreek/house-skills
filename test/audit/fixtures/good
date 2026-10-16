@@ -11,6 +11,9 @@ case "${1:-}" in
   --json) echo '{"ok": true}' ;;
   --lines) echo '{"n": 1}'; echo '{"n": 2}' ;;
   --fail-bare) echo '{"ok": false}'; exit 1 ;;
+  --partial) echo '{"items": [], "problems": [{"input": "x", "error": "unreadable"}]}'; exit 3 ;;
+  --partial-junk) echo '{"problems": [1, {}]}'; exit 3 ;;
+  --partial-bare) echo '{"items": []}'; exit 3 ;;
   --fail-empty) echo '{"error": ""}'; exit 3 ;;
   --fail-json) echo '{"error": "it broke", "usage": false}'; echo "good: it broke" >&2; exit 1 ;;
   --env) printf '{"proxy": "%s", "git": "%s"}\n' "${HTTPS_PROXY:-}" "${GIT_ALLOW_PROTOCOL:-}" ;;

@@ -22,13 +22,22 @@ Template: `templates/rust/` — `src/main.rs` and `tests/contract.rs`
   writing escape codes.
 - **`--json` is global**, so every subcommand accepts it. A command that
   reports nothing should say so under `--json` rather than print prose.
-- **`main` uses `try_parse`**, so a usage error under `--json` is JSON too
-  (A5). It lets clap print help and version itself.
+- **`main` parses through `command()`**, the derived command plus what derive
+  cannot hold: each command's examples (from `EXAMPLES`) and the exit codes
+  on every help page (E4). A usage error under `--json` is JSON too (A5),
+  its message joined up to clap's first blank line so it names the flag.
+- **No command prints help to stdout and exits 0** (`command: Option<…>`),
+  where clap's default is the whole help on stderr with exit 2 (D3).
+- **`--version zz`** prints the version and ignores the rest: clap's
+  behaviour, harmless, and the one place the Rust template differs.
+- **Lists flatten `Limit`** (`--limit N`, default 20; the value name `N`
+  makes `describe` say `integer`) and go through `capped`. A partial result
+  returns `ExitCode::from(PARTIAL)` after printing `problems`.
 - **Mutating commands flatten `Change`**: an `ArgGroup` that is required and
   not multiple, so clap refuses neither and both with exit 2. `describe`
   marks a command `mutates` when it has `--yes`.
 - **Tests** use `tempfile` for a fresh directory per case, with `TOOL_HOME`
-  pointing inside it.
+  pointing inside it, and run in parallel (cargo's default).
 
 ## Distribution
 
