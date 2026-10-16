@@ -121,9 +121,9 @@ describe("contract", { concurrency: true }, () => {
     assert.match(capped.err, /2 of 3 shown; --limit 0 for all/);
     assert.deepEqual([json(all).shown, json(all).truncated, all.err], [3, false, ""]);
     assert.equal(text.out, "30\ta\n"); // stdout carries results only
-    // A newline in a name cannot forge a row.
-    writeFileSync(join(cwd, "x\n999\tfake"), "x".repeat(40));
-    assert.equal((await run(["files", "--limit", "1"], { cwd })).out, "40\tx?999\tfake\n");
+    // A newline in a name cannot forge a row, nor a C1 control start an escape.
+    writeFileSync(join(cwd, "x\n999\tfake\u009b2J"), "x".repeat(40));
+    assert.equal((await run(["files", "--limit", "1"], { cwd })).out, "40\tx?999\tfake?2J\n");
   });
 
   test("a missing input is a failure that names it; an unreadable part is partial", async () => {
@@ -231,6 +231,16 @@ describe("contract", { concurrency: true }, () => {
     assert.equal(readFileSync(join(outside, "keep"), "utf8"), "precious");
     assert.equal(existsSync(join(outside, "gone")) || existsSync(join(outside, "x")), false);
     assert.equal(existsSync(join(cwd, "sub", "sub")) || existsSync(join(cwd, "newdir")), false);
+  });
+
+  test("with no home, state and cache are never written to the current directory", async () => {
+    const cwd = sandbox();
+    const env = { TOOL_HOME: "", HOME: "", XDG_STATE_HOME: "", XDG_CACHE_HOME: "" };
+    const [help, r] = [await run(["--help"], { cwd, env }), await run(["touch", "x", "--yes", "--json"], { cwd, env })];
+    assert.equal(help.code, 0);
+    assert.deepEqual([r.code, json(r).changed, json(r).recorded], [0, true, false]);
+    assert.match(r.err, /no home directory/);
+    assert.equal(existsSync(join(cwd, ".local")) || existsSync(join(cwd, ".cache")), false);
   });
 
   test("an absolute path inside the current directory is fine", async () => {

@@ -72,14 +72,15 @@ function emit(values: Values, json: unknown, text: () => string) {
 // An empty argument or a control character in one is a usage error (rubric A9).
 function plain(what: string, s: string): string {
   if (s === "") throw new UsageError(`${what} is empty`);
-  if (/[\u0000-\u001f\u007f]/.test(s)) throw new UsageError(`${what} contains a control character`);
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(s)) throw new UsageError(`${what} contains a control character`);
   return s;
 }
 
 // Text from files or the network, made safe to print to a terminal: every
-// control character but tab, newline included, so a file name cannot forge
-// a row of output.
-const printable = (s: string) => s.replace(/[\u0000-\u0008\u000a-\u001f\u007f]/g, "?");
+// control character but tab (C0, DEL and C1, as Rust's is_control and Go's
+// unicode.IsControl), newline included, so a file name cannot forge a row
+// of output or start an escape sequence (U+009B).
+const printable = (s: string) => s.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g, "?");
 
 // The file an output path names, refused unless it is plainly inside root
 // (rubric A9). Every template's inside() refuses the same things: a `..`
@@ -115,7 +116,9 @@ function homes(): Set<string> {
 const KINDS = ["config", "cache", "state"] as const;
 
 // Where config, cache and state live (conventions: State). TOOL_HOME moves
-// all three under one directory; tests set it.
+// all three under one directory; tests set it. "" when there is no home to
+// put them in (HOME empty, as under some services; homedir() then returns
+// ""): never the current directory.
 function home(kind: "config" | "cache" | "state"): string {
   const override = process.env.TOOL_HOME;
   if (override) return join(resolve(override), kind);
@@ -123,7 +126,9 @@ function home(kind: "config" | "cache" | "state"): string {
   const fallback = { config: ".config", cache: ".cache", state: join(".local", "state") }[kind];
   const base = process.env[xdg];
   // XDG says to ignore a relative path.
-  return join(base && isAbsolute(base) ? base : join(homedir(), fallback), NAME);
+  if (base && isAbsolute(base)) return join(base, NAME);
+  const user = homedir();
+  return isAbsolute(user) ? join(user, fallback, NAME) : "";
 }
 
 // Append one JSON line to a state file (conventions: State). Appending
@@ -133,6 +138,10 @@ function home(kind: "config" | "cache" | "state"): string {
 // recorded: false.
 function appendState(name: string, entry: unknown): boolean {
   const state = home("state");
+  if (!state) {
+    console.error(`${NAME}: warning: not recorded: no home directory; set TOOL_HOME or XDG_STATE_HOME`);
+    return false;
+  }
   try {
     mkdirSync(state, { recursive: true, mode: 0o700 });
     appendFileSync(inside(state, name), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
