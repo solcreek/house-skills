@@ -59,7 +59,9 @@ change is cheap:
   tests set (C2, conventions).
 - An argument that becomes a path, URL or query is validated (A9). Output
   paths stay inside the root the command writes to.
-- Secrets come from env or stdin, never from a flag (S4).
+- Secrets come from stdin (or a file the caller names), never from a flag,
+  and never appear in output, errors or `problems` (S4, conventions:
+  Secrets). Without a piped value the command refuses; it never prompts.
 - A tool wrapping an API also takes the whole request as JSON (A11).
 
 ## 3. Scaffold
@@ -80,7 +82,7 @@ runner. Keep the contract tests.
 
 ## 4. Replace the example
 
-The template has two example commands, each a pattern to copy:
+The template has three example commands, each a pattern to copy:
 
 - `files [DIR] [--limit N]` reports: an optional positional with a default,
   an integer flag, the capped list shape with its stderr note, a missing
@@ -88,8 +90,12 @@ The template has two example commands, each a pattern to copy:
 - `touch PATH` mutates: `--dry-run`/`--yes`, an output path checked by
   `inside`, a rerun that changes nothing, and a line appended to its state
   under `home("state")`, where a failure to record is only a warning.
+- `forget PATH` mutates state as its action: under `withLock` it reads the
+  state back, keeps any line it cannot parse, and rewrites the file with
+  `replaceFile`; a failure to write is exit 1, a held lock exit 4.
 
-Model your commands on them, then delete them. Keep:
+Model your commands on them, then delete them. Keep what your commands use
+and delete the rest (a tool with no state needs no `home` or `appendState`):
 
 - the **help check before `run`**, the positional-count check and the
   `--dry-run`/`--yes` check in TypeScript's `main`, and the usage-error
@@ -97,9 +103,10 @@ Model your commands on them, then delete them. Keep:
 - the mutating pattern: `mutates: true` (TypeScript), flattening `Change`
   (Rust), or `mutating(cmd)` plus `change(cmd)` (Go);
 - the helpers: `inside` for any path the tool writes (create with
-  create-only-if-absent), `home` for config, cache and state, `homes` so a
-  walk skips them, `appendState` for history-like state, `capped` for every
-  list, and `reason` for an error's words without its path;
+  create-only-if-absent), `withLock` and `replaceFile` to rewrite a file in
+  place, `home` for config, cache and state, `homes` so a walk skips them,
+  `appendState` for history-like state, `capped` for every list, and
+  `reason` for an error's words without its path;
 - `describe`, generated from the same definitions as help, in the shape of
   [references/describe.md](references/describe.md) shared by all three
   templates;
@@ -126,6 +133,12 @@ every command:
     $A/run-json -- BINARY describe
     $A/run-json --expect-exit 0 --cwd FIXTURE --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
     $A/run-json --expect-exit 2 -- BINARY MUTATING … --json   # no --yes: refused, as JSON
+
+Check the failures too: a missing input (`--expect-exit 1`), an unreadable
+part (`--expect-exit 3`), a held lock (`--expect-exit 4`). A command that
+reads a secret or a payload from stdin gets it with `--stdin FILE`. Write
+each call out in full: a flag list kept in a shell variable does not
+word-split under zsh.
 
 Give every `run-json` call an `--expect-exit`: without it, a failure that
 prints a well-formed error passes. Point commands that read files at a

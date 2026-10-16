@@ -17,9 +17,17 @@ Template: `templates/typescript/` — `bin/NAME` (the entry point), `src/main.ts
   (too few or too many is usage), and for a mutating command exactly one of
   `--dry-run`/`--yes`. `parseArgs` does none of this; its own errors are
   folded to one line.
-- **Errors**: throw `UsageError` for a bad invocation (exit 2) and
-  `Failure` for an expected failure (exit 1, message only). Anything else is
-  a bug: exit 1 with the stack.
+- **Errors**: throw `UsageError` for a bad invocation (exit 2), `Failure` for
+  an expected failure (exit 1, message only) and `Busy` for a held lock
+  (exit 4). Anything else is a bug: exit 1 with the stack.
+- **Rewriting a file**: `withLock(dir, name, fn)` then `replaceFile(dir,
+  name, data)` inside it. A SIGINT or SIGTERM removes the lock and any temp
+  file the run made. `appendState` takes the same lock, so an append never
+  lands in a file being renamed away.
+- **Reading stdin** (a secret): `readFileSync(0, "utf8")` once, after the
+  argument checks, and only when `process.stdin.isTTY` is false; otherwise
+  refuse with a `UsageError` naming the pipe. The test helper's `run` takes
+  no input, so give it an `input` option the way `spawn`'s stdin is written.
 - **`styleText(…, { stream })`** colours only when that stream is a terminal
   and `NO_COLOR` is unset, on every Node the template supports. Never write
   raw escape codes.
