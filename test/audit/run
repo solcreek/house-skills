@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Tests for cli:audit's probe. Each case probes a fixture tool in
-# test/audit/fixtures and asserts on the JSON and the exit code.
+# Tests for cli:audit's probe and run-json. Each case runs one against a
+# fixture tool in test/audit/fixtures and asserts on the JSON and exit code.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-probe="$root/plugins/cli/skills/audit/scripts/probe"
+scripts="$root/plugins/cli/skills/audit/scripts"
 fx="$root/test/audit/fixtures"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 pass=0
 fail=0
+# Colour forcing from the caller (CI often sets it) must not change results;
+# cases that test it set it themselves.
+unset FORCE_COLOR CLICOLOR_FORCE NO_COLOR
 
-# check NAME WANT_EXIT JQ_EXPR PROBE_ARGS... : runs the probe, asserts its
+# check NAME SCRIPT WANT_EXIT JQ_EXPR ARGS... : runs the script, asserts its
 # exit code and that JQ_EXPR is true of its output.
 check() {
-  local name=$1 want=$2 expr=$3; shift 3
+  local name=$1 script=$2 want=$3 expr=$4; shift 4
   local got=0
-  "$probe" "$@" > "$tmp/out" 2> "$tmp/err" || got=$?
+  "$scripts/$script" "$@" > "$tmp/out" 2> "$tmp/err" || got=$?
   if [ "$got" != "$want" ]; then
     echo "FAIL $name: exit $got, want $want"; cat "$tmp/out" "$tmp/err"; fail=$((fail + 1)); return
   fi
@@ -25,81 +28,116 @@ check() {
   fi
   pass=$((pass + 1))
 }
+probe() { local name=$1 want=$2 expr=$3; shift 3; check "$name" probe "$want" "$expr" "$@"; }
+runjson() { local name=$1 want=$2 expr=$3; shift 3; check "$name" run-json "$want" "$expr" "$@"; }
 
-status() { echo "(.checks[] | select(.id == \"$1\") | .status) == \"$2\""; }
+# Each expression is parenthesized so they combine with `and`.
+is() { echo "([.checks[] | select(.id == \"$1\") | .status] == [\"$2\"])"; }
+says() { echo "([.checks[] | select(.id == \"$1\") | .status == \"fail\" and (.detail | test(\"$2\"))] == [true])"; }
 
-# A tool that follows the conventions passes every check.
-check "good: all pass" 0 '.summary == {pass: 9}' -- "$fx/good"
-check "good: help on stdout" 0 '.checks[0].run.stdout | startswith("usage: good")' -- "$fx/good"
-check "good: unknown flag exit kept" 0 '.checks[] | select(.id == "unknown-flag") | .run.exit == 2' -- "$fx/good"
-check "good: argv recorded as data" 0 '.checks[0].run.argv[1] == "--help"' -- "$fx/good"
-check "good: command recorded" 0 ".command == [\"$fx/good\"]" -- "$fx/good"
+# A tool that follows the conventions passes every check, colour included.
+probe "good: all pass" 0 '.summary == {pass: 10}' -- "$fx/good"
+probe "good: help on stdout" 0 '.checks[0].run.stdout | startswith("usage: good")' -- "$fx/good"
+probe "good: usage exit kept" 0 '.checks[] | select(.id == "unknown-flag") | .run.exit == 2' -- "$fx/good"
+probe "good: argv recorded as data" 0 '.checks[0].run.argv[1] == "--help"' -- "$fx/good"
+probe "good: command recorded" 0 ".command == [\"$fx/good\"]" -- "$fx/good"
+probe "good: NO_COLOR tested" 0 '.checks[] | select(.id == "no-color-env") | .detail | test("none with NO_COLOR")' -- "$fx/good"
+
+# The caller's colour forcing never reaches the tool: good colours under
+# FORCE_COLOR even with NO_COLOR, as Node does.
+FORCE_COLOR=1 CLICOLOR_FORCE=1 NO_COLOR=1 \
+  probe "FORCE_COLOR in the caller's env is stripped" 0 '.summary == {pass: 10}' -- "$fx/good"
 
 # Each broken convention is its own failure.
-check "bad: help on stderr, exit 1" 1 "$(status help-long fail)" -- "$fx/bad"
-check "bad: help detail names all three" 1 \
+probe "bad: help on stderr, exit 1" 1 "$(is help-long fail)" -- "$fx/bad"
+probe "bad: help detail names all three" 1 \
   '.checks[0].detail | test("exit 1") and test("nothing on stdout") and test("on stderr")' -- "$fx/bad"
-check "bad: --version without a number" 1 \
-  '.checks[] | select(.id == "version") | .status == "fail" and (.detail | test("no version number"))' -- "$fx/bad"
-check "bad: unknown flag ignored" 1 \
-  '.checks[] | select(.id == "unknown-flag") | .detail | test("exit 0 on an unknown flag")' -- "$fx/bad"
-check "bad: unknown subcommand runs the action" 1 \
-  '.checks[] | select(.id == "unknown-command") | .detail | test("exit 0 on an unknown subcommand")' -- "$fx/bad"
-check "bad: colour into a pipe" 1 "$(status no-color-piped fail)" -- "$fx/bad"
-check "bad: colour despite NO_COLOR" 1 "$(status no-color-env fail)" -- "$fx/bad"
-check "bad: no help to measure" 1 "$(status help-width skip)" -- "$fx/bad"
-check "bad: nothing to time" 1 "$(status startup skip)" -- "$fx/bad"
+probe "bad: unknown flag ignored" 1 "$(says unknown-flag 'exit 0 on an unknown flag')" -- "$fx/bad"
+probe "bad: unknown subcommand runs the action" 1 "$(says unknown-command 'exit 0 on an unknown subcommand')" -- "$fx/bad"
+probe "bad: colour into a pipe" 1 "$(is no-color-piped fail)" -- "$fx/bad"
+probe "bad: no help, nothing to measure or time" 1 \
+  "$(is help-width skip) and $(is startup skip) and $(is no-color-env skip)" -- "$fx/bad"
 
-# A caller's colour forcing never reaches the tool.
-FORCE_COLOR=1 CLICOLOR_FORCE=1 check "good: FORCE_COLOR stripped" 0 "$(status no-color-piped pass)" -- "$fx/good"
+# False passes the review found: each must now fail.
+probe "ignorer: exit 1 is not a usage error" 1 \
+  "$(says unknown-flag 'exit 1, the code for a runtime failure') and $(says unknown-command 'exit 1')" -- "$fx/ignorer"
+probe "ignorer: one cause named" 1 "$(says help-long 'stops before reading its arguments')" -- "$fx/ignorer"
+probe "actor: ignored --help is not help" 1 \
+  "$(says help-long 'the flag was ignored|neither') and $(says help-short 'ignored|neither')" -- "$fx/actor"
+probe "verhelp: --version printing help" 1 "$(says version 'printed the help')" -- "$fx/verhelp"
+probe "dumper: whole help on a bad flag" 1 \
+  "$(is unknown-flag pass) and $(says usage-message 'does not name the flag') and $(says usage-message 'lines on stderr')" -- "$fx/dumper"
+probe "nonocolor: NO_COLOR ignored under a terminal" 1 "$(says no-color-env 'NO_COLOR=1')" -- "$fx/nonocolor"
+probe "never colours: NO_COLOR untested" 0 \
+  '.checks[] | select(.id == "no-color-env") | .status == "skip" and (.detail | test("untested"))' -- "$fx/sub" wt
 
 # Skips are reported, not dropped.
-check "skip unknown-command for a positional" 0 \
+probe "skip is recorded" 0 \
+  '[.checks[] | select(.status == "skip") | .id] == ["unknown-flag", "usage-message"]' --skip unknown-flag -- "$fx/good"
+probe "skip unknown-command for a positional" 0 \
   '[.checks[] | select(.status == "skip") | .id] == ["unknown-command"]' --skip unknown-command -- "$fx/good"
-check "skip is recorded" 0 \
-  '[.checks[] | select(.status == "skip") | .id] == ["unknown-flag"]' --skip unknown-flag -- "$fx/good"
+probe "--skip help: no run of --help or -h at all" 0 \
+  '([.checks[] | select(.status == "skip") | .id] | sort) == (["help-long", "help-short", "no-color-env", "help-width", "startup"] | sort)
+   and all(.checks[].run.argv? // []; index("--help") == null and index("-h") == null)' --skip help -- "$fx/good"
 
-# A hang is a failure within the timeout, and its children die with it.
+# --brief shrinks runs; --offline reaches the tool's environment.
+probe "--brief: run is exit, ms, first stderr line" 0 \
+  '.checks[] | select(.id == "unknown-flag") | .run == {exit: 2, ms: .run.ms, timedOut: false, stderr: "good: unknown flag --zz-no-such-flag (see good --help)"}' \
+  --brief -- "$fx/good"
+runjson "--offline: proxies and git transports" 0 \
+  '.offline and (.checks[0].run.stdout | fromjson | .proxy == "http://127.0.0.1:9" and .git == "none")' --offline -- "$fx/good" --env
+runjson "no --offline: environment untouched" 0 \
+  '(.offline | not) and (.checks[0].run.stdout | fromjson | .proxy == "")' -- "$fx/good" --env
+
+# A hang fails within the timeout, and its children die with it: the probe's
+# stdout goes through a pipe, which a surviving grandchild would hold open.
 start=$(date +%s)
-check "hang: --help times out" 1 \
-  '.checks[0] | .status == "fail" and (.detail | test("timed out")) and .run.timedOut' \
-  --timeout 1 --skip no-color-env -- "$fx/hang"
-if [ $(( $(date +%s) - start )) -gt 15 ]; then
-  echo "FAIL hang: the probe waited on the hung tool's child"; fail=$((fail + 1))
-else
-  pass=$((pass + 1))
-fi
+"$scripts/probe" --timeout 1 -- "$fx/hang" | cat > "$tmp/out" || true
+if [ $(( $(date +%s) - start )) -gt 20 ]; then echo "FAIL hang: the probe waited on the hung tool's child"; fail=$((fail + 1))
+elif pgrep -f "sleep 301" > /dev/null; then echo "FAIL hang: sleep 301 survived"; pkill -f "sleep 301" || true; fail=$((fail + 1))
+elif ! jq -e '.checks[0] | .status == "fail" and .run.timedOut and (.detail | test("raise --timeout"))' "$tmp/out" > /dev/null; then
+  echo "FAIL hang: not a timeout"; cat "$tmp/out"; fail=$((fail + 1))
+else pass=$((pass + 1)); fi
 
 # Arguments before the flag select a subcommand.
-check "sub: probes the subcommand" 0 '.summary == {pass: 8, skip: 1}' -- "$fx/sub" wt
-check "sub: --version not asked of it" 0 "$(status version skip)" -- "$fx/sub" wt
-check "sub: --version skip by caller wins" 0 \
+probe "sub: probes the subcommand" 0 '.summary == {pass: 8, skip: 2}' -- "$fx/sub" wt
+probe "sub: argv has the subcommand" 0 '.checks[0].run.argv[1:] == ["wt", "--help"]' -- "$fx/sub" wt
+probe "sub: --version not asked of it" 0 "$(is version skip)" -- "$fx/sub" wt
+probe "sub: a caller's --skip version wins" 0 \
   '[.checks[] | select(.id == "version") | .detail] == ["skipped by caller"]' --skip version -- "$fx/sub" wt
-check "sub: argv has the subcommand" 0 '.checks[0].run.argv[1:] == ["wt", "--help"]' -- "$fx/sub" wt
 
-# --json-output runs the argv once and judges stdout.
-check "json: one document" 0 "$(status json-valid pass)" --json-output -- "$fx/good" --json
-check "json: two documents" 1 \
-  '.checks[0].detail | test("2 JSON documents")' --json-output -- "$fx/bad" --json
-check "json: not JSON" 1 \
-  '.checks[0].detail | test("not JSON")' --json-output -- "$fx/hang" --json
-check "json: empty stdout" 1 \
-  '.checks[0].detail | test("nothing on stdout")' --json-output -- "$fx/good" --bogus
+# run-json runs the argv once and judges stdout.
+runjson "json: one document" 0 "$(is json-valid pass)" -- "$fx/good" --json
+runjson "json: two documents" 1 "$(says json-valid '2 JSON documents')" -- "$fx/bad" --json
+runjson "json: not JSON" 1 "$(says json-valid 'not JSON')" -- "$fx/hang" --json
+runjson "json: empty stdout" 1 "$(says json-valid 'nothing on stdout')" -- "$fx/good" --bogus
+runjson "json: NDJSON with --lines" 0 "$(is json-valid pass)" --lines -- "$fx/good" --lines
+runjson "json: NDJSON without --lines" 1 "$(says json-valid 'pass --lines')" -- "$fx/good" --lines
+runjson "json: --lines catches a bad line" 1 "$(says json-valid '1 of 1 lines')" --lines -- "$fx/hang" --json
 
 # The working directory is empty and temporary unless the caller names one.
-check "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"
-check "cwd: given one is used" 0 ".cwd == \"$tmp\"" --cwd "$tmp" -- "$fx/good"
+probe "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"
+probe "cwd: given one is used" 0 ".cwd == \"$tmp\"" --cwd "$tmp" -- "$fx/good"
 
 # Could not probe: exit 2 with an error, never a check list.
-check "missing command" 2 '.error | test("command not found")' -- no-such-command-zz
-check "not executable" 2 '.error | test("not an executable")' -- "$fx/../run.nope"
+probe "missing command" 2 '.error | test("command not found")' -- no-such-command-zz
+probe "not executable" 2 '.error | test("not an executable")' -- "$fx/noexec"
+runjson "run-json: missing command" 2 '.error | test("command not found")' -- no-such-command-zz
 
-# Bad usage: exit 64.
-for args in "" "--timeout" "--timeout 0 -- ls" "--timeout x -- ls" "--frob -- ls"; do
+# Bad usage: exit 64. run-json takes no --skip; probe takes no --lines.
+for s in probe run-json; do
+  for args in "" "--timeout" "--timeout 0 -- ls" "--timeout x -- ls" "--frob -- ls"; do
+    got=0
+    # shellcheck disable=SC2086
+    "$scripts/$s" $args > /dev/null 2>&1 || got=$?
+    if [ "$got" = 64 ]; then pass=$((pass + 1)); else echo "FAIL $s usage '$args': exit $got"; fail=$((fail + 1)); fi
+  done
+done
+for c in "probe --lines -- ls" "run-json --skip x -- ls"; do
   got=0
   # shellcheck disable=SC2086
-  "$probe" $args > /dev/null 2>&1 || got=$?
-  if [ "$got" = 64 ]; then pass=$((pass + 1)); else echo "FAIL usage '$args': exit $got"; fail=$((fail + 1)); fi
+  "$scripts/"$c > /dev/null 2>&1 || got=$?
+  if [ "$got" = 64 ]; then pass=$((pass + 1)); else echo "FAIL usage '$c': exit $got"; fail=$((fail + 1)); fi
 done
 
 echo "$pass passed, $fail failed"

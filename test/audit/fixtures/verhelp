@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# --version falls through to help, and the help happens to mention a version.
+case "${1:-}" in
+  -h|--help|--version) echo "usage: verhelp (needs Node 22.18)" ;;
+  -*) echo "verhelp: unknown flag $1" >&2; exit 2 ;;
+  *) echo "verhelp: unknown command $1" >&2; exit 2 ;;
+esac

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Colours under a terminal and ignores NO_COLOR.
+b= r=
+if [ -t 1 ]; then b=$(printf '\033[1m') r=$(printf '\033[0m'); fi
+case "${1:-}" in
+  -h|--help) echo "${b}usage:${r} nonocolor" ;;
+  --version) echo "nonocolor 1.0.0" ;;
+  -*) echo "nonocolor: unknown flag $1" >&2; exit 2 ;;
+  *) echo "nonocolor: unknown command $1" >&2; exit 2 ;;
+esac

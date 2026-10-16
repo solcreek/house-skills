@@ -1,38 +1,54 @@
 #!/usr/bin/env bash
 # Black-box probe of a command-line tool's conventions. Prints JSON.
 #
-#   probe [--timeout SECS] [--skip ID]... [--cwd DIR] -- CMD [ARGS...]
-#     Runs CMD ARGS with --help, -h, --version, one unknown flag and one
-#     unknown subcommand, and
-#     checks help, version, usage errors, colour, width and startup time.
-#     ARGS select a subcommand: `probe -- mk wt` probes `mk wt --help` etc.
-#     (--version is checked only at the top level).
-#   probe --json-output [--timeout SECS] [--cwd DIR] -- CMD [ARGS...]
-#     Runs exactly CMD ARGS once and checks stdout is one JSON document.
+#   probe [--timeout SECS] [--skip ID]... [--cwd DIR] [--offline] [--brief]
+#         -- CMD [ARGS...]
 #
-# Every run gets stdin from /dev/null, an empty temporary working directory
-# (unless --cwd), no FORCE_COLOR/CLICOLOR_FORCE/NO_COLOR from the caller, and
-# a timeout (default 10 s) that kills the whole process group.
+# Runs CMD ARGS with --help, -h, --version, one unknown flag and one unknown
+# subcommand, plus --help twice under a terminal (script(1)), and checks
+# help, version, usage errors, colour, width and startup time. ARGS select a
+# subcommand: `probe -- mk wt` probes `mk wt --help` and so on; --version is
+# checked only at the top level. It never runs anything else: to check an
+# action's --json output, use run-json.
 #
-# The caller decides it is safe to run CMD with these flags: a tool that
-# ignores an unknown flag, or --help, may perform its action instead.
+# Every run gets stdin at EOF, an empty temporary working directory (unless
+# --cwd), no FORCE_COLOR/CLICOLOR_FORCE/NO_COLOR from the caller, and a
+# timeout (default 10 s) that kills the whole process group.
+#
+# The caller decides it is safe: a tool that ignores --help, an unknown flag
+# or an unknown subcommand may perform its action instead. Skip
+# unknown-command where CMD ARGS takes a free positional argument.
+#
+# Check ids: help-long help-short version unknown-flag unknown-command
+# usage-message no-color-piped no-color-env help-width startup.
+# `--skip help` skips every check that runs --help or -h (help-long,
+# help-short, no-color-env, help-width, startup).
+# --offline points proxies nowhere and stops git transports (best effort).
+# --brief cuts each run to exit, ms and the first line of stderr.
 #
 # Exit: 0 every check passed, 1 at least one failed, 2 could not probe
-# (command not found or not executable, or jq/perl missing), 64 bad usage.
+# (command not found or not executable, jq/perl missing), 64 bad usage.
 set -euo pipefail
 
-usage() { echo "usage: probe [--json-output] [--timeout SECS] [--skip ID]... [--cwd DIR] -- CMD [ARGS...]" >&2; exit 64; }
+usage() { echo "usage: probe [--timeout SECS] [--skip ID]... [--cwd DIR] [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
 
 timeout=10
-mode=flags
 skip=" "
 cwd=
+offline=
+brief=
 while [ $# -gt 0 ]; do
   case "$1" in
     --timeout) [ $# -ge 2 ] || usage; timeout=$2; shift 2 ;;
-    --skip) [ $# -ge 2 ] || usage; skip="$skip$2 "; shift 2 ;;
+    --skip) [ $# -ge 2 ] || usage
+      case "$2" in
+        help) skip="$skip help-long help-short no-color-env help-width startup " ;;
+        *) skip="$skip$2 " ;;
+      esac
+      shift 2 ;;
+    --offline) offline=1; shift ;;
+    --brief) brief=1; shift ;;
     --cwd) [ $# -ge 2 ] || usage; cwd=$2; shift 2 ;;
-    --json-output) mode=json; shift ;;
     --) shift; break ;;
     *) usage ;;
   esac
@@ -41,88 +57,37 @@ done
 case "$timeout" in ''|*[!0-9]*) usage ;; esac
 [ "$timeout" -ge 1 ] || usage
 
-cant() { jq -n --arg r "$1" '{error: $r}'; exit 2; }
-command -v jq >/dev/null || { echo '{"error":"jq not found"}'; exit 2; }
-command -v perl >/dev/null || cant "perl not found"
-
-cmd=$1
-case "$cmd" in
-  */*) [ -f "$cmd" ] && [ -x "$cmd" ] || cant "not an executable file: $cmd"
-       cmd="$(cd "$(dirname "$cmd")" && pwd)/$(basename "$cmd")" ;;
-  *) command -v "$cmd" >/dev/null || cant "command not found: $cmd" ;;
-esac
+command -v jq > /dev/null || { echo '{"error":"jq not found"}'; exit 2; }
+command -v perl > /dev/null || { echo '{"error":"perl not found"}'; exit 2; }
+. "$(dirname "$0")/lib.sh"
+cmd=$(resolve "$1") || { echo "$cmd"; exit 2; }
 shift
 base=("$cmd" "$@")
+# The word help should name: the last subcommand, or the tool.
+if [ $# -gt 0 ]; then word=${!#}; else word=$(basename "$cmd"); fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 if [ -z "$cwd" ]; then cwd="$tmp/cwd"; mkdir "$cwd"; fi
-[ -d "$cwd" ] || cant "not a directory: $cwd"
+[ -d "$cwd" ] || { jq -n --arg e "not a directory: $cwd" '{error: $e}'; exit 2; }
 results="$tmp/results"
 : > "$results"
-n=0
-
-# run NAME ARGV... : runs ARGV under the timeout; leaves $tmp/NAME.{out,err,meta}.
-# meta is "EXIT MS TIMEDOUT".
-run() {
-  local name=$1; shift
-  (cd "$cwd" && env -u FORCE_COLOR -u CLICOLOR_FORCE -u NO_COLOR \
-    perl -MTime::HiRes=time -e '
-      my ($secs, $meta) = (shift, shift);
-      my $t0 = time;
-      my $pid = fork // die "fork: $!";
-      if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
-      my $timed = 0;
-      $SIG{ALRM} = sub { $timed = 1; kill "KILL", -$pid };
-      alarm $secs;
-      while (waitpid($pid, 0) == -1 && $!{EINTR}) {}
-      my $st = $?;
-      alarm 0;
-      my $code = ($st & 127) ? 128 + ($st & 127) : $st >> 8;
-      open my $fh, ">", $meta or die; printf $fh "%d %d %d\n", $code, (time - $t0) * 1000, $timed;
-    ' "$timeout" "$tmp/$name.meta" "$@" < /dev/null > "$tmp/$name.out" 2> "$tmp/$name.err") || true
-}
-
-# runjson NAME ARGV... : the run as JSON, output cut to 2000 bytes.
-runjson() {
-  local name=$1; shift
-  local exit ms timed
-  read -r exit ms timed < "$tmp/$name.meta"
-  jq -n --argjson exit "$exit" --argjson ms "$ms" --argjson timed "$timed" \
-    --argjson ob "$(bytes "$tmp/$name.out")" --argjson eb "$(bytes "$tmp/$name.err")" \
-    --arg o "$(head -c 2000 "$tmp/$name.out")" --arg e "$(head -c 2000 "$tmp/$name.err")" \
-    --argjson argv "$(argv "$@")" \
-    '{argv: $argv, exit: $exit, ms: $ms, timedOut: ($timed == 1),
-      stdoutBytes: $ob, stderrBytes: $eb, stdout: $o, stderr: $e}'
-}
-
-# record ID STATUS DETAIL [RUNJSON]
-record() {
-  jq -cn --arg id "$1" --arg s "$2" --arg d "$3" --argjson r "${4:-null}" \
-    '{id: $id, status: $s, detail: $d} + (if $r then {run: $r} else {} end)' >> "$results"
-}
-
-# bytes FILE: size without the padding BSD wc adds.
-bytes() { wc -c < "$1" | tr -d ' '; }
-# argv ARGS...: a JSON array of ARGS. Each goes through --arg, never as a jq
-# option: an argument like --help must stay data.
-argv() { local a; for a in "$@"; do jq -n --arg a "$a" '$a'; done | jq -cs .; }
+ran=""
 
 skipped() { case "$skip" in *" $1 "*) record "$1" skip "skipped by caller"; return 0 ;; esac; return 1; }
-meta() { read -r exit ms timed < "$tmp/$1.meta"; }
-has_ansi() { grep -q "$(printf '\033')" "$tmp/$1.out" "$tmp/$1.err"; }
 
-# A check on one flag. EXPECT is ok (exit 0, output on stdout, stderr empty)
-# or usage (non-zero exit, message on stderr, stdout empty).
+# flagcheck ID EXPECT ARGV... : one run, judged. EXPECT is ok (exit 0,
+# output on stdout, stderr empty) or usage (exit neither 0 nor 1, a message
+# on stderr, stdout empty).
 flagcheck() {
   local id=$1 expect=$2; shift 2
   skipped "$id" && return
-  n=$((n + 1))
+  ran="$ran $id"
   run "$id" "$@"
   local r; r=$(runjson "$id" "$@")
   meta "$id"
   local ob eb; ob=$(bytes "$tmp/$id.out"); eb=$(bytes "$tmp/$id.err")
-  if [ "$timed" = 1 ]; then record "$id" fail "timed out after ${timeout}s with stdin at EOF" "$r"; return; fi
+  if [ "$timed" = 1 ]; then record "$id" fail "timed out after ${timeout}s (stdin was at EOF: waiting on input, or slow; raise --timeout to tell which)" "$r"; return; fi
   if [ "$exit" = 127 ] && [ "$ob" -eq 0 ]; then record "$id" fail "exit 127: the command could not be executed" "$r"; return; fi
   local why=
   if [ "$expect" = ok ]; then
@@ -130,112 +95,137 @@ flagcheck() {
     [ "$ob" -gt 0 ] || why="$why; nothing on stdout"
     [ "$eb" -eq 0 ] || why="$why; ${eb} bytes on stderr"
   else
-    [ "$exit" != 0 ] || why="$why; exit 0 on an unknown $( [ "$id" = unknown-command ] && echo subcommand || echo flag ) (ignored, or an action ran)"
+    local what=flag; [ "$id" = unknown-command ] && what=subcommand
+    case "$exit" in
+      0) why="$why; exit 0 on an unknown $what (ignored, or an action ran)" ;;
+      1) why="$why; exit 1, the code for a runtime failure: a usage error needs its own (2, or 64)" ;;
+    esac
     [ "$eb" -gt 0 ] || why="$why; no message on stderr"
     [ "$ob" -eq 0 ] || why="$why; ${ob} bytes on stdout"
   fi
   if [ -n "$why" ]; then record "$id" fail "${why#; }" "$r"; else record "$id" pass "exit $exit" "$r"; fi
 }
 
-if [ "$mode" = json ]; then
-  run json "${base[@]}"
-  r=$(runjson json "${base[@]}")
-  meta json
-  if [ "$timed" = 1 ]; then
-    record json-valid fail "timed out after ${timeout}s with stdin at EOF" "$r"
-  elif [ "$(bytes "$tmp/json.out")" -eq 0 ]; then
-    record json-valid fail "nothing on stdout (exit $exit)" "$r"
-  elif docs=$(jq -s length < "$tmp/json.out" 2>/dev/null); then
-    if [ "$docs" = 1 ]; then record json-valid pass "one JSON document (exit $exit)" "$r"
-    else record json-valid fail "$docs JSON documents on stdout, expected one (exit $exit)" "$r"; fi
-  else
-    record json-valid fail "stdout is not JSON (exit $exit)" "$r"
-  fi
-  if has_ansi json; then record no-color-piped fail "escape codes in output written to a pipe"
-  else record no-color-piped pass "no escape codes"; fi
+same() { [ -s "$tmp/$1.out" ] && [ -f "$tmp/$2.out" ] && cmp -s "$tmp/$1.out" "$tmp/$2.out"; }
+
+flagcheck help-long ok "${base[@]}" --help
+flagcheck help-short ok "${base[@]}" -h
+if [ ${#base[@]} -gt 1 ]; then
+  skipped version || record version skip "a subcommand; --version is checked at the top level"
 else
-  flagcheck help-long ok "${base[@]}" --help
-  flagcheck help-short ok "${base[@]}" -h
-  # --version is the tool's, not each subcommand's (rubric D1).
-  if [ ${#base[@]} -gt 1 ]; then
-    skipped version || record version skip "a subcommand; --version is checked at the top level"
+  flagcheck version ok "${base[@]}" --version
+fi
+flagcheck unknown-flag usage "${base[@]}" --zz-no-such-flag
+flagcheck unknown-command usage "${base[@]}" zz-no-such-command
+
+# A pass above only says the exit code and streams were right. A tool that
+# ignores its arguments prints the same thing every time.
+for id in help-long help-short; do
+  [ "$(status $id)" = pass ] || continue
+  for other in unknown-flag unknown-command; do
+    if same "$id" "$other"; then demote "$id" "printed the same stdout as an unknown ${other#unknown-}: the flag was ignored"; continue 2; fi
+  done
+  if ! grep -qiF -e usage -e "$word" "$tmp/$id.out"; then
+    demote "$id" "stdout names neither \"usage\" nor \"$word\": is it help?"
+  fi
+done
+# Every run failing the same way says the tool stops before reading its
+# arguments (a checkout or config it needs): one cause, worth naming.
+if [ "$(status help-long)" = fail ] && [ -s "$tmp/help-long.err" ] &&
+   [ -f "$tmp/unknown-flag.err" ] && cmp -s "$tmp/help-long.err" "$tmp/unknown-flag.err"; then
+  jq -c 'if .id == "help-long" then .detail += "; --help and an unknown flag fail with the same stderr: it stops before reading its arguments" else . end' \
+    "$results" > "$tmp/r2" && mv "$tmp/r2" "$results"
+fi
+if [ "$(status version)" = pass ]; then
+  if same version help-long; then demote version "printed the help, not a version"
+  elif ! grep -Eq '[0-9]+\.[0-9]+' "$tmp/version.out"; then demote version "exit 0 but no version number on stdout"
+  fi
+fi
+
+# D3, A4: a usage error is short and names what was wrong.
+if ! skipped usage-message; then
+  if [ "$(status unknown-flag)" = pass ]; then
+    lines=$(awk 'END { print NR }' "$tmp/unknown-flag.err")
+    why=
+    grep -qF zz-no-such-flag "$tmp/unknown-flag.err" || why="$why; the message does not name the flag"
+    [ "$lines" -le 5 ] || why="$why; $lines lines on stderr: print one or two and point to --help"
+    if [ -n "$why" ]; then record usage-message fail "${why#; }"; else record usage-message pass "$lines lines, names the flag"; fi
   else
-    flagcheck version ok "${base[@]}" --version
+    record usage-message skip "unknown-flag did not pass"
   fi
-  if [ "$(jq -s 'map(select(.id == "version" and .status == "pass")) | length' "$results")" = 1 ] &&
-     ! grep -Eq '[0-9]+\.[0-9]+' "$tmp/version.out"; then
-    # Exit 0 without a version number usually means --version fell through to help.
-    jq -c 'if .id == "version" then .status = "fail" | .detail = "exit 0 but no version number on stdout" else . end' \
-      "$results" > "$tmp/r2" && mv "$tmp/r2" "$results"
-  fi
-  flagcheck unknown-flag usage "${base[@]}" --zz-no-such-flag
-  # An unknown subcommand: cobra without a RunE, for one, prints help and
-  # exits 0. Skip it where this level takes a free positional argument.
-  flagcheck unknown-command usage "${base[@]}" zz-no-such-command
+fi
 
-  if ! skipped no-color-piped; then
-    dirty=
-    for f in "$tmp"/*.meta; do
-      name=$(basename "$f" .meta)
-      if has_ansi "$name"; then dirty="$dirty $name"; fi
-    done
-    if [ -n "$dirty" ]; then record no-color-piped fail "escape codes in output written to a pipe:$dirty"
-    else record no-color-piped pass "no escape codes in $n runs"; fi
-  fi
+if ! skipped no-color-piped; then
+  dirty=
+  for id in $ran; do has_ansi "$id" && dirty="$dirty $id"; done
+  if [ -n "$dirty" ]; then record no-color-piped fail "escape codes in output written to a pipe:$dirty"
+  else record no-color-piped pass "no escape codes in$ran"; fi
+fi
 
-  if ! skipped no-color-env; then
-    if ! command -v script >/dev/null; then
-      record no-color-env skip "script(1) not found; cannot run under a terminal"
+# --help under a terminal, with and without NO_COLOR. Trust a run only if it
+# printed the help: a script(1) that cannot get a pty prints nothing useful.
+ttyrun() {
+  local name=$1; shift
+  if [ "$(uname)" = Darwin ]; then
+    run "$name" "$@" script -q /dev/null "${base[@]}" --help
+  else
+    run "$name" "$@" script -qec "$(printf '%q ' "${base[@]}" --help)" /dev/null
+  fi
+  # macOS script echoes ^D and backspaces for the EOF on stdin; pty output has CRs.
+  tr -d '\r\004\010' < "$tmp/$name.out" > "$tmp/$name.clean"
+}
+if ! skipped no-color-env; then
+  first=$(grep -m1 . "$tmp/help-long.out" 2>/dev/null | tr -d '\r' || true)
+  if ! command -v script > /dev/null; then
+    record no-color-env skip "script(1) not found; cannot run under a terminal"
+  elif [ "$(status help-long)" != pass ]; then
+    record no-color-env skip "--help did not pass; nothing to compare under a terminal"
+  else
+    ttyrun tty-color env
+    # Escape codes are stripped for the comparison, so coloured help still matches.
+    if ! sed "s/$(printf '\033')\[[0-9;]*[A-Za-z]//g" "$tmp/tty-color.clean" | grep -qF -- "$first"; then
+      meta tty-color
+      record no-color-env skip "could not run under a terminal (script exit $exit$( [ "$timed" = 1 ] && echo ", timed out"))"
+    elif ! grep -q "$(printf '\033')" "$tmp/tty-color.clean"; then
+      record no-color-env skip "no colour under a terminal either, so NO_COLOR is untested"
     else
-      if [ "$(uname)" = Darwin ]; then
-        tty=(script -q /dev/null "${base[@]}" --help)
-      else
-        tty=(script -qec "$(printf '%q ' "${base[@]}" --help)" /dev/null)
-      fi
-      (cd "$cwd" && NO_COLOR=1 perl -e 'alarm shift; exec @ARGV' "$timeout" "${tty[@]}" \
-        < /dev/null > "$tmp/tty.out" 2>&1) || true
-      if [ ! -s "$tmp/tty.out" ]; then
-        record no-color-env skip "no output under a terminal"
-      elif grep -q "$(printf '\033')" "$tmp/tty.out"; then
+      ttyrun tty-nocolor env NO_COLOR=1
+      if grep -q "$(printf '\033')" "$tmp/tty-nocolor.clean"; then
         record no-color-env fail "escape codes in --help under a terminal with NO_COLOR=1"
       else
-        record no-color-env pass "no escape codes under a terminal with NO_COLOR=1"
+        record no-color-env pass "colour under a terminal, none with NO_COLOR=1"
       fi
-    fi
-  fi
-
-  if ! skipped help-width; then
-    if [ -s "$tmp/help-long.out" ]; then
-      w=$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$tmp/help-long.out")
-      if [ "$w" -le 100 ]; then record help-width pass "longest --help line is $w columns"
-      else record help-width fail "longest --help line is $w columns, over 100"; fi
-    else
-      record help-width skip "no --help output to measure"
-    fi
-  fi
-
-  if ! skipped startup; then
-    if [ -f "$tmp/help-long.meta" ] && [ "$(cut -d' ' -f1 "$tmp/help-long.meta")" = 0 ]; then
-      best=$(cut -d' ' -f2 "$tmp/help-long.meta")
-      for i in 1 2; do
-        run startup$i "${base[@]}" --help
-        m=$(cut -d' ' -f2 "$tmp/startup$i.meta")
-        [ "$m" -lt "$best" ] && best=$m
-      done
-      if [ "$best" -le 300 ]; then record startup pass "--help in ${best} ms (best of 3)"
-      else record startup fail "--help in ${best} ms (best of 3), over 300"; fi
-    else
-      record startup skip "--help did not exit 0; nothing to time"
     fi
   fi
 fi
 
-case "$cwd" in "$tmp"/*) cwd="(a temporary empty directory)" ;; esac
-jq -s --arg cwd "$cwd" '{
-  cwd: $cwd,
-  summary: (group_by(.status) | map({key: .[0].status, value: length}) | from_entries),
-  checks: .
-}' "$results" > "$tmp/body"
-jq -n --slurpfile b "$tmp/body" --argjson c "$(argv "${base[@]}")" '{command: $c} + $b[0]'
-jq -se 'any(.status == "fail")' "$results" >/dev/null && exit 1
-exit 0
+if ! skipped help-width; then
+  if [ "$(status help-long)" = pass ]; then
+    w=$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$tmp/help-long.out")
+    if [ "$w" -le 100 ]; then record help-width pass "longest --help line is $w columns"
+    else record help-width fail "longest --help line is $w columns, over 100"; fi
+  else
+    record help-width skip "--help did not pass; nothing to measure"
+  fi
+fi
+
+if ! skipped startup; then
+  if [ "$(status help-long)" = pass ]; then
+    meta help-long
+    best=$ms
+    # Two more runs only when they could change the verdict.
+    if [ "$best" -le 900 ]; then
+      for i in 1 2; do
+        run startup$i "${base[@]}" --help
+        meta startup$i
+        [ "$ms" -lt "$best" ] && best=$ms
+      done
+    fi
+    if [ "$best" -le 300 ]; then record startup pass "--help in ${best} ms (best of 3)"
+    else record startup fail "--help in ${best} ms (best of 3), over 300"; fi
+  else
+    record startup skip "--help did not pass; nothing to time"
+  fi
+fi
+
+report "${base[@]}"

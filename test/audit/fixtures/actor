@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Ignores every argument and performs its action, which prints to stdout.
+echo "synced 3 of 3 items (v1.2 protocol)"

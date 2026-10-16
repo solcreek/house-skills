@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Waits forever on --help (as a tool behind a pager or a prompt would);
-# its child must die with it, or the probe's caller waits on the pipe.
+# Waits forever on --help (as a tool behind a pager or a prompt would). Its
+# child, `sleep 301`, must die with it; the test looks for that marker.
 case "${1:-}" in
-  --help) sleep 300 & wait ;;
+  --help) sleep 301 & wait ;;
   --json) echo 'not json' ;;
   *) echo "usage: hang" >&2; exit 2 ;;
 esac
