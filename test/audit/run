@@ -67,7 +67,10 @@ else
 fi
 
 # Arguments before the flag select a subcommand.
-check "sub: probes the subcommand" 0 '.summary == {pass: 8}' -- "$fx/sub" wt
+check "sub: probes the subcommand" 0 '.summary == {pass: 7, skip: 1}' -- "$fx/sub" wt
+check "sub: --version not asked of it" 0 "$(status version skip)" -- "$fx/sub" wt
+check "sub: --version skip by caller wins" 0 \
+  '[.checks[] | select(.id == "version") | .detail] == ["skipped by caller"]' --skip version -- "$fx/sub" wt
 check "sub: argv has the subcommand" 0 '.checks[0].run.argv[1:] == ["wt", "--help"]' -- "$fx/sub" wt
 
 # --json-output runs the argv once and judges stdout.

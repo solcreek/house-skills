@@ -5,6 +5,7 @@
 #     Runs CMD ARGS with --help, -h, --version and one unknown flag, and
 #     checks help, version, usage errors, colour, width and startup time.
 #     ARGS select a subcommand: `probe -- mk wt` probes `mk wt --help` etc.
+#     (--version is checked only at the top level).
 #   probe --json-output [--timeout SECS] [--cwd DIR] -- CMD [ARGS...]
 #     Runs exactly CMD ARGS once and checks stdout is one JSON document.
 #
@@ -154,7 +155,12 @@ if [ "$mode" = json ]; then
 else
   flagcheck help-long ok "${base[@]}" --help
   flagcheck help-short ok "${base[@]}" -h
-  flagcheck version ok "${base[@]}" --version
+  # --version is the tool's, not each subcommand's (rubric D1).
+  if [ ${#base[@]} -gt 1 ]; then
+    skipped version || record version skip "a subcommand; --version is checked at the top level"
+  else
+    flagcheck version ok "${base[@]}" --version
+  fi
   if [ "$(jq -s 'map(select(.id == "version" and .status == "pass")) | length' "$results")" = 1 ] &&
      ! grep -Eq '[0-9]+\.[0-9]+' "$tmp/version.out"; then
     # Exit 0 without a version number usually means --version fell through to help.
