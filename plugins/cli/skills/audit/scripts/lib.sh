@@ -9,7 +9,8 @@ OFFLINE_ENV="HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PR
 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9
 NO_PROXY= no_proxy= GIT_ALLOW_PROTOCOL=none"
 
-# run NAME ARGV... : runs ARGV in $cwd under the timeout, stdin at EOF, with
+# run NAME ARGV... : runs ARGV in $cwd under the timeout, stdin at EOF (or
+# $stdin_from, run-json's --stdin), with
 # no colour forcing or NO_COLOR from the caller. Kills the whole process
 # group on timeout. Leaves $tmp/NAME.{out,err,meta}; meta is "EXIT MS TIMEDOUT".
 # perl by its absolute path: --env PATH=… must not hide it.
@@ -37,7 +38,7 @@ run() {
       kill "KILL", -$pid if $timed;
       my $code = ($st & 127) ? 128 + ($st & 127) : $st >> 8;
       open my $fh, ">", $meta or die; printf $fh "%d %d %d\n", $code, (time - $t0) * 1000, $timed;
-    ' "$timeout" "$tmp/$name.meta" "$@" < /dev/null > "$tmp/$name.out" 2> "$tmp/$name.err") || true
+    ' "$timeout" "$tmp/$name.meta" "$@" < "${stdin_from:-/dev/null}" > "$tmp/$name.out" 2> "$tmp/$name.err") || true
   # No meta: the runner itself never started. Report it as could-not-execute.
   [ -f "$tmp/$name.meta" ] || echo "127 0 0" > "$tmp/$name.meta"
 }

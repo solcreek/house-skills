@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run one command and check its machine-readable output. Prints JSON.
 #
-#   run-json [--lines] [--expect-exit N] [--timeout SECS] [--cwd DIR]
-#            [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]
+#   run-json [--lines] [--expect-exit N] [--stdin FILE] [--timeout SECS]
+#            [--cwd DIR] [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]
 #
 # Runs exactly CMD ARGS once. This runs an action, so the caller must know
 # it is safe (read-only and local), or have the user's yes. Checks:
@@ -13,14 +13,15 @@
 #                   a "problems" array; skipped on exit 0
 #   exit            with --expect-exit N, the exit code is N
 #   no-color-piped  no escape codes on stdout or stderr
-# --env, --offline and --brief as in probe. Same isolation as probe: stdin at EOF, an empty temporary directory unless
+# --stdin feeds FILE to the command (a secret or payload it is documented to
+# read); without it stdin is at EOF. --env, --offline and --brief as in probe. Same isolation as probe: stdin at EOF, an empty temporary directory unless
 # --cwd, no colour forcing, a timeout that kills the process group.
 #
 # Exit: 0 both passed, 1 one failed, 2 could not run (command not found or
 # not executable, jq/perl missing), 64 bad usage.
 set -euo pipefail
 
-usage() { echo "usage: run-json [--lines] [--expect-exit N] [--timeout SECS] [--cwd DIR] [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
+usage() { echo "usage: run-json [--lines] [--expect-exit N] [--stdin FILE] [--timeout SECS] [--cwd DIR] [--env K=V]... [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
 
 . "$(dirname "$0")/lib.sh"
 timeout=10
@@ -29,6 +30,7 @@ cwd=
 offline=
 brief=
 expect=
+stdin_from=
 runenv=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,6 +38,7 @@ while [ $# -gt 0 ]; do
     --cwd) [ $# -ge 2 ] || usage; cwd=$2; shift 2 ;;
     --lines) lines=1; shift ;;
     --env) [ $# -ge 2 ] || usage; envarg "$2"; shift 2 ;;
+    --stdin) [ $# -ge 2 ] || usage; stdin_from=$2; shift 2 ;;
     --expect-exit) [ $# -ge 2 ] || usage; case "$2" in ''|*[!0-9]*) usage ;; esac; expect=$2; shift 2 ;;
     --offline) offline=1; shift ;;
     --brief) brief=1; shift ;;
@@ -50,6 +53,10 @@ case "$timeout" in ''|*[!0-9]*) usage ;; esac
 command -v jq > /dev/null || { echo '{"error":"jq not found"}'; exit 2; }
 command -v perl > /dev/null || { echo '{"error":"perl not found"}'; exit 2; }
 cmd=$(resolve "$1") || { echo "$cmd"; exit 2; }
+if [ -n "$stdin_from" ]; then
+  [ -f "$stdin_from" ] && [ -r "$stdin_from" ] || { jq -n --arg e "not a readable file: $stdin_from" '{error: $e}'; exit 2; }
+  stdin_from="$(cd "$(dirname "$stdin_from")" && pwd)/$(basename "$stdin_from")"
+fi
 shift
 base=("$cmd" "$@")
 

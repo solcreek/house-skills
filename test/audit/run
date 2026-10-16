@@ -138,6 +138,13 @@ runjson "json-error: exit 3 with malformed problems" 1 "$(says json-error 'probl
 runjson "json-error: exit 3 without problems" 1 "$(says json-error 'problems')" -- "$fx/good" --partial-bare
 runjson "json-error: an empty error fails" 1 "$(says json-error 'non-empty')" -- "$fx/good" --fail-empty
 
+printf 'sekrit\n' > "$tmp/secret"
+runjson "--stdin feeds the command" 0 \
+  '.checks[0].run.stdout | fromjson | .got == "sekrit"' --stdin "$tmp/secret" -- "$fx/good" --echo-stdin
+runjson "no --stdin: stdin at EOF" 0 \
+  '.checks[0].run.stdout | fromjson | .got == ""' -- "$fx/good" --echo-stdin
+runjson "--stdin needs a readable file" 2 '.error | test("not a readable file")' --stdin "$tmp/none" -- "$fx/good" --echo-stdin
+
 # The working directory is empty and temporary unless the caller names one.
 probe "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"
 probe "cwd: given one is used" 0 ".cwd == \"$tmp\"" --cwd "$tmp" -- "$fx/good"
