@@ -139,6 +139,11 @@ describe("contract", { concurrency: true }, () => {
     assert.equal(r.code, 3);
     assert.deepEqual(json(r).problems, [{ input: "sub", error: "permission denied" }]);
     assert.equal(json(r).total, 2); // the rest is still there
+    // Under an unsearchable parent, a DIR is unreadable, not missing.
+    chmodSync(join(cwd, "sub"), 0o000);
+    const hidden = await run(["files", join(cwd, "sub", "inner"), "--json"]);
+    chmodSync(join(cwd, "sub"), 0o700);
+    assert.match(json(hidden).error, /cannot read .*: permission denied/);
     // Nothing readable at all is a failure, not a partial result.
     chmodSync(cwd, 0o000);
     const none = await run(["files", cwd, "--json"]);

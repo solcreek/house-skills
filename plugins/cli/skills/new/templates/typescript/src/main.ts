@@ -169,8 +169,15 @@ const commands: Command[] = [
     run(values, [dir = "."]) {
       // Lexically, like the other templates: `a/..` is the current directory.
       const given = resolve(plain("DIR", dir));
-      if (!existsSync(given)) throw new Failure(`no such directory: ${given}`);
-      if (!statSync(given).isDirectory()) throw new Failure(`not a directory: ${given}`);
+      let info;
+      try {
+        info = statSync(given);
+      } catch (e) {
+        // existsSync would call EACCES "missing": only ENOENT is.
+        if ((e as { code?: string }).code === "ENOENT") throw new Failure(`no such directory: ${given}`);
+        throw new Failure(`cannot read ${given}: ${reason(e)}`);
+      }
+      if (!info.isDirectory()) throw new Failure(`not a directory: ${given}`);
       // Walk the real path, so a symlinked DIR (or current directory) lists
       // its files, and paths compare with the tool's own homes below.
       const root = realpathSync(given);

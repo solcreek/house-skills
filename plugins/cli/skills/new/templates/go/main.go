@@ -133,7 +133,7 @@ func newRoot() *cobra.Command {
 					if info, err := d.Info(); err == nil {
 						found = append(found, file{rel, info.Size()})
 					} else {
-						problems = append(problems, map[string]string{"input": rel, "error": err.Error()})
+						problems = append(problems, map[string]string{"input": rel, "error": cause(err)})
 					}
 				}
 				return nil
