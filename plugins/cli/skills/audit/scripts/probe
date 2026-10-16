@@ -145,10 +145,11 @@ fi
 # D3, A4: a usage error is short and names what was wrong.
 if ! skipped usage-message; then
   if [ "$(status unknown-flag)" = pass ]; then
-    lines=$(awk 'END { print NR }' "$tmp/unknown-flag.err")
+    # Blank lines are spacing, not bulk: count the others.
+    lines=$(awk 'NF { n++ } END { print n + 0 }' "$tmp/unknown-flag.err")
     why=
     grep -qF zz-no-such-flag "$tmp/unknown-flag.err" || why="$why; the message does not name the flag"
-    [ "$lines" -le 5 ] || why="$why; $lines lines on stderr: print one or two and point to --help"
+    [ "$lines" -le 5 ] || why="$why; $lines non-blank lines on stderr: print one or two and point to --help"
     if [ -n "$why" ]; then record usage-message fail "${why#; }"; else record usage-message pass "$lines lines, names the flag"; fi
   else
     record usage-message skip "unknown-flag did not pass"
