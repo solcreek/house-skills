@@ -146,7 +146,7 @@ fn ties_sort_by_bytes_a_symlinked_dir_lists_and_the_home_is_skipped() {
     cli_in(d.path(), home).args(["touch", "made", "--yes"]).assert().success();
     assert!(d.path().join(".home/state/history.jsonl").exists());
     std::fs::write(d.path().join(".home/extra"), "x").unwrap();
-    let v = json(&cli_in(d.path(), &home).args(["files", "--json"]).output().unwrap().stdout);
+    let v = json(&cli_in(d.path(), home).args(["files", "--json"]).output().unwrap().stdout);
     assert!(v["items"].as_array().unwrap().iter().all(|i| !i["path"].as_str().unwrap().starts_with(".home")));
 }
 
@@ -265,10 +265,104 @@ fn a_failed_write_names_the_file() {
 }
 
 #[test]
+fn forget_rewrites_state_under_its_lock_keeps_unparsed_lines_and_the_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = sandbox();
+    let home = sandbox();
+    for n in ["a", "b"] {
+        cli_in(d.path(), home.path()).args(["touch", n, "--yes"]).assert().success();
+    }
+    let file = home.path().join("state/history.jsonl");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("not json\n");
+    std::fs::write(&file, &text).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let dry = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--dry-run", "--json"]).output().unwrap().stdout);
+    assert_eq!((dry["removed"].as_u64(), dry["dryRun"].as_bool()), (Some(1), Some(true)));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    let yes = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!((yes["removed"].as_u64(), yes["changed"].as_bool()), (Some(1), Some(true)));
+    let lines: Vec<String> = std::fs::read_to_string(&file).unwrap().lines().map(String::from).collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("/b\"") && lines[1] == "not json");
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+    let again = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!(again["changed"], false);
+}
+
+#[test]
+fn a_held_lock_is_busy_and_a_left_lock_file_is_not() {
+    let d = sandbox();
+    let home = sandbox();
+    cli_in(d.path(), home.path()).args(["touch", "a", "--yes"]).assert().success();
+    let file = home.path().join("state/history.jsonl");
+    let before = std::fs::read_to_string(&file).unwrap();
+    // Another run holding the OS lock: this test process.
+    let held = std::fs::OpenOptions::new().write(true).open(home.path().join("state/history.jsonl.lock")).unwrap();
+    held.lock().unwrap();
+    let busy = cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap();
+    held.unlock().unwrap();
+    assert_eq!(busy.status.code(), Some(4));
+    assert!(json(&busy.stdout)["error"].as_str().unwrap().contains("locked by another run"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    // The file left behind, unlocked (as after a crash): nothing to wait for.
+    let taken = cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap();
+    assert!(taken.status.success());
+    assert_eq!(json(&taken.stdout)["removed"], 1);
+}
+
+#[test]
+fn concurrent_forget_and_touch_lose_nothing_and_revive_nothing() {
+    let d = sandbox();
+    let home = sandbox();
+    for i in 0..12 {
+        cli_in(d.path(), home.path()).args(["touch", &format!("p{i}"), "--yes"]).assert().success();
+    }
+    let runs: Vec<_> = (0..12)
+        .flat_map(|i| [vec!["forget".to_string(), format!("p{i}")], vec!["touch".to_string(), format!("n{i}")]])
+        .map(|args| {
+            let (cwd, home) = (d.path().to_path_buf(), home.path().to_path_buf());
+            std::thread::spawn(move || cli_in(&cwd, &home).args(&args).arg("--yes").output().unwrap())
+        })
+        .collect();
+    for r in runs {
+        let out = r.join().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let text = std::fs::read_to_string(home.path().join("state/history.jsonl")).unwrap();
+    let names: Vec<String> = text
+        .lines()
+        .map(|l| json(l.as_bytes())["path"].as_str().unwrap().rsplit('/').next().unwrap().to_string())
+        .collect();
+    let mut want: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+    let mut got = names.clone();
+    want.sort();
+    got.sort();
+    assert_eq!(got, want, "history: {text}");
+}
+
+#[test]
+fn forget_finds_a_path_however_it_is_spelled() {
+    let d = sandbox();
+    let home = sandbox();
+    std::fs::create_dir(d.path().join("real")).unwrap();
+    std::os::unix::fs::symlink(d.path().join("real"), d.path().join("link")).unwrap();
+    cli_in(d.path(), home.path()).args(["touch", "link/n", "--yes"]).assert().success();
+    let v = json(&cli_in(d.path(), home.path()).args(["forget", "link/n", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!(v["removed"], 1);
+    // Its directory deleted: the rest still resolves (tmpdir is a symlink on macOS).
+    std::fs::create_dir(d.path().join("sub")).unwrap();
+    cli_in(d.path(), home.path()).args(["touch", "sub/f", "--yes"]).assert().success();
+    std::fs::remove_dir_all(d.path().join("sub")).unwrap();
+    let v = json(&cli_in(d.path(), home.path()).args(["forget", "sub/f", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!(v["removed"], 1);
+}
+
+#[test]
 fn describe_lists_every_command_its_args_and_flags() {
     let d = sandbox();
     let v = json(&cli(d.path()).arg("describe").output().unwrap().stdout);
-    assert_eq!(v["exitCodes"], serde_json::json!({ "ok": 0, "failed": 1, "usage": 2, "partial": 3 }));
+    assert_eq!(v["exitCodes"], serde_json::json!({ "ok": 0, "failed": 1, "usage": 2, "partial": 3, "busy": 4 }));
     let names = |c: &Value| -> Vec<String> {
         let mut n: Vec<String> = c["flags"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         n.sort();
@@ -285,5 +379,6 @@ fn describe_lists_every_command_its_args_and_flags() {
     assert_eq!((limit["type"].as_str(), limit["default"].as_str()), (Some("integer"), Some("20")));
     assert_eq!(names(&cmd("touch")), ["dry-run", "help", "json", "yes"]);
     assert_eq!(cmd("touch")["mutates"], true);
+    assert_eq!(cmd("forget")["mutates"], true);
     assert!(!cmd("files")["examples"].as_array().unwrap().is_empty());
 }

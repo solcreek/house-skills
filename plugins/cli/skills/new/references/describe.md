@@ -9,7 +9,7 @@ when you add commands; add fields, never rename them.
   "name": "tool",
   "version": "0.1.0",
   "summary": "one line on what it is for",
-  "exitCodes": { "ok": 0, "failed": 1, "usage": 2, "partial": 3 },
+  "exitCodes": { "ok": 0, "failed": 1, "usage": 2, "partial": 3, "busy": 4 },
   "flags": [{ "name": "help", "short": "h", "type": "boolean", "default": null, "description": "…" }],
   "commands": [
     {
@@ -29,10 +29,13 @@ when you add commands; add fields, never rename them.
 }
 ```
 
-- The top level has exactly `name`, `version`, `summary`, `exitCodes`,
-  `flags`, `commands`; every command has exactly `name`, `summary`, `usage`,
-  `mutates`, `args`, `flags`, `examples`, `commands`. Every key is always
-  present; an absent value is `null` or `[]`.
+- The top level always has `name`, `version`, `summary`, `exitCodes`,
+  `flags`, `commands`; every command always has `name`, `summary`, `usage`,
+  `mutates`, `args`, `flags`, `examples`, `commands`. An absent value is
+  `null` or `[]`, never a missing key. A tool may add keys (`stdin: true` on
+  a command that reads a secret, its own `exits`); it never removes or
+  renames these. The templates add none, and `test/new` checks they have
+  exactly these.
 - A command's `flags` include the ones it inherits (`--json`, `--help`): what
   its `--help` shows.
 - `mutates` is on every command: true means it takes `--dry-run` and `--yes`

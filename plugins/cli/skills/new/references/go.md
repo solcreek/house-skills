@@ -16,6 +16,20 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
 
 ## Other notes
 
+- **`cobra.EnableTraverseRunHooks = true`** in `main`: cobra otherwise runs
+  only the nearest `PersistentPreRunE`, so a subcommand that defines its own
+  would silently skip the root's mutating guard. Keep it.
+- **Rewriting a file**: `withLock(dir, name, fn)` around `replaceFile(dir,
+  name, data)`; a held lock is `busyError`, exit 4. `main`'s signal handler
+  removes the run's temp files on Ctrl-C. The lock is `flock`
+  (`lock_unix.go`: darwin, the BSDs, illumos and linux; solaris and aix
+  have no `syscall.Flock`) or kernel32's `LockFileEx` (`lock_windows.go`, called
+  through `syscall` so go.mod needs no `golang.org/x/sys`); the kernel drops
+  it when the process ends. The Windows file builds and vets; it has not
+  been run on Windows (verified 2026-10-16).
+- **The tests are `package main`**, so their helpers (`run`, `decode`,
+  `tree`, `must`, `result`) share a namespace with `main.go`; rename a clash
+  rather than the helpers, or move the tests to `package main_test`.
 - **Mutating commands**: `mutating(cmd)` adds `--dry-run` and `--yes` and
   marks it; the root's `PersistentPreRunE` then refuses it unless exactly
   one is set, so no command can forget. `RunE` calls `change(cmd)` to learn
@@ -41,8 +55,9 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
 - **`--json` on a failure**: pflag stops at a bad flag, so `files --zz --json`
   never sets `asJSON`. `main` also looks for `--json` in `os.Args` on the
   error path; keep that.
-- **Colour**: `fatih/color` honours `NO_COLOR` and the terminal. cobra's
-  `completion` command comes free; keep it (D5).
+- **Colour**: the template prints none. If a tool needs it, add `fatih/color`,
+  which honours `NO_COLOR` and the terminal. cobra's `completion` command
+  comes free; keep it (D5).
 - **Version**: `var version` is set at release with
   `-ldflags "-X main.version=$(git describe --tags)"`.
 - **Small tools**: the standard `flag` package exits 2 on a bad flag, but it

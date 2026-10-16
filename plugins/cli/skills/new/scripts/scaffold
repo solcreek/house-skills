@@ -75,6 +75,8 @@ case "$stack" in
   rust)
     # cargo init keeps an existing src/main.rs and only writes Cargo.toml.
     cargo init -q --vcs none --name "$name" . > "$log" 2>&1 || failed "cargo init"
+    # File::try_lock is std from 1.89: an older toolchain says so up front.
+    perl -pi -e 's/^(edition = .*)$/$1\nrust-version = "1.89"/' Cargo.toml
     {
       cargo add -q clap --features derive &&
       cargo add -q serde_json anyhow &&
@@ -87,6 +89,9 @@ case "$stack" in
   go)
     {
       go mod init "$name" &&
+      # The oldest Go the template needs (range over int), not this machine's
+      # patch release, so a teammate's toolchain is not forced to upgrade.
+      go mod edit -go=1.22 &&
       go get github.com/spf13/cobra@latest &&
       go mod tidy
     } > "$log" 2>&1 || failed "go mod / go get"

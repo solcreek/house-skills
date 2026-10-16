@@ -1,10 +1,15 @@
+import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -18,10 +23,12 @@ const VERSION = "0.1.0";
 const SUMMARY = "one line on what it is for";
 
 // Every exit code, in help and in `describe`. Add to it; never reuse one.
-const EXIT = { ok: 0, failed: 1, usage: 2, partial: 3 } as const;
+const EXIT = { ok: 0, failed: 1, usage: 2, partial: 3, busy: 4 } as const;
 
 class UsageError extends Error {}
 class Failure extends Error {}
+// Another run holds a lock this one needs: nothing changed, retry (exit 4).
+class Busy extends Error {}
 
 type Option = {
   type: "boolean" | "string";
@@ -106,8 +113,8 @@ function inside(root: string, path: string): string {
   return target;
 }
 
-// The tool's own directories that exist, by real path: a walk skips them
-// (conventions: Paths), so a TOOL_HOME inside the tree is not listed.
+// This CLI's own directories that exist, by real path: a walk skips them
+// (conventions: Paths), so TOOL_HOME inside the tree is not listed.
 function homes(): Set<string> {
   const dirs = [process.env.TOOL_HOME ? resolve(process.env.TOOL_HOME) : "", ...KINDS.map(home)];
   return new Set(dirs.filter((d) => d && existsSync(d)).map((d) => realpathSync(d)));
@@ -144,11 +151,122 @@ function appendState(name: string, entry: unknown): boolean {
   }
   try {
     mkdirSync(state, { recursive: true, mode: 0o700 });
-    appendFileSync(inside(state, name), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    // Under the lock replaceFile takes, so an append never lands in a file
+    // that is being renamed away.
+    withLock(state, name, () =>
+      appendFileSync(inside(state, name), `${JSON.stringify(entry)}\n`, { mode: 0o600 }),
+    );
     return true;
   } catch (e) {
     console.error(`${NAME}: warning: not recorded in ${join(state, name)}: ${reason(e)}`);
     return false;
+  }
+}
+
+const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// Longer than any run holds the lock (a read, a rename: milliseconds), so a
+// lock this old was left by a run that died.
+const STALE_MS = 10_000;
+
+// Run fn holding dir/name.lock (conventions: State). Node has no OS file
+// lock, so the lock is a directory: mkdir creates it atomically or fails. A
+// run that dies leaves it; once it is older than STALE_MS the next run takes
+// it over by renaming it away, which only one run can do. Until then, and
+// while another run holds it, 2 s of waiting ends in Busy, exit 4.
+function withLock<T>(dir: string, name: string, fn: () => T): T {
+  const lock = inside(dir, `${name}.lock`);
+  const token = `${process.pid}.${randomBytes(4).toString("hex")}`;
+  for (const deadline = Date.now() + 2000; ; pause(20)) {
+    try {
+      mkdirSync(lock, { mode: 0o700 });
+      writeFileSync(join(lock, token), "");
+      break;
+    } catch (e) {
+      if ((e as { code?: string }).code !== "EEXIST") throw new Failure(`cannot lock ${lock}: ${reason(e)}`);
+    }
+    let judged;
+    try {
+      judged = statSync(lock);
+    } catch {
+      continue; // released meanwhile
+    }
+    if (Date.now() - judged.mtimeMs > STALE_MS) {
+      const away = `${lock}.stale.${token}`;
+      try {
+        renameSync(lock, away);
+      } catch {
+        continue; // another run took it over first
+      }
+      // The rename moves whatever is at the path now, which may be a lock
+      // another run made after the stat: then it goes back, untouched.
+      if (statSync(away).ino !== judged.ino) {
+        try {
+          renameSync(away, lock);
+        } catch {
+          rmSync(away, { recursive: true, force: true });
+          throw new Busy(`${join(dir, name)} changed hands while being taken over; retry`);
+        }
+        continue;
+      }
+      rmSync(away, { recursive: true, force: true });
+      continue;
+    }
+    if (Date.now() > deadline) throw new Busy(`${join(dir, name)} is locked by another run; retry`);
+  }
+  try {
+    return fn();
+  } finally {
+    // Only our own lock: if ours was taken over as stale, the token is gone
+    // and the directory belongs to someone else.
+    try {
+      rmSync(join(lock, token));
+      rmSync(lock, { recursive: true });
+    } catch {}
+  }
+}
+
+// The path as touch records it: the real path of its directories and the
+// name, so forget finds it however the caller spells the directories (a
+// symlink, macOS's /tmp), even once they are deleted: the longest part that
+// still exists is resolved and the rest kept as written. The name itself is
+// compared as given (no case or Unicode folding).
+function recorded(path: string): string {
+  const rest: string[] = [];
+  for (let p = resolve(path); ; ) {
+    const up = dirname(p);
+    rest.unshift(basename(p));
+    if (up === p) return resolve(path);
+    try {
+      return join(realpathSync(up), ...rest);
+    } catch {
+      p = up;
+    }
+  }
+}
+
+// Replace dir/name with data (conventions: State): a uniquely named temp file
+// beside it, given the target's mode (a new file 0600), renamed over it. The
+// rename never follows a symlink; inside() refused one already.
+function replaceFile(dir: string, name: string, data: string) {
+  const target = inside(dir, name);
+  const temp = inside(dir, `.${name}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  let mode = 0o600;
+  try {
+    mode = statSync(target).mode & 0o777;
+  } catch {} // new file
+  try {
+    writeFileSync(temp, data, { flag: "wx", mode });
+  } catch (e) {
+    // Not ours to remove: the create failed.
+    throw new Failure(`cannot write ${target}: ${reason(e)}`);
+  }
+  try {
+    chmodSync(temp, mode); // the umask may have narrowed it
+    renameSync(temp, target);
+  } catch (e) {
+    rmSync(temp, { force: true });
+    throw new Failure(`cannot write ${target}: ${reason(e)}`);
   }
 }
 
@@ -188,7 +306,7 @@ const commands: Command[] = [
       }
       if (!info.isDirectory()) throw new Failure(`not a directory: ${given}`);
       // Walk the real path, so a symlinked DIR (or current directory) lists
-      // its files, and paths compare with the tool's own homes below.
+      // its files, and paths compare with this CLI's own homes below.
       const root = realpathSync(given);
       const own = homes();
       // What cannot be read inside the tree is a problem, never silently
@@ -251,10 +369,51 @@ const commands: Command[] = [
           throw new Failure(`cannot create ${target}: ${reason(e)}`);
         }
       }
-      // State: what this tool created, kept across runs.
+      // State: what this CLI created, kept across runs.
       const recorded = changed && !dryRun ? appendState("history.jsonl", { path: target }) : false;
       const verb = !changed ? "exists" : dryRun ? "would create" : "created";
       emit(values, { path: target, changed, dryRun, recorded }, () => `${verb} ${target}`);
+      return EXIT.ok;
+    },
+  },
+  {
+    name: "forget",
+    summary: "remove a file from what touch has created",
+    args: [{ name: "PATH", required: true }],
+    examples: [`${NAME} forget notes.txt --dry-run`, `${NAME} forget notes.txt --yes --json`],
+    mutates: true,
+    options: {},
+    run(values, [path]) {
+      // Writing state is this command's action, so failing to is failing.
+      const state = home("state");
+      if (!state) throw new Failure("no home directory; set TOOL_HOME or XDG_STATE_HOME");
+      const target = recorded(plain("PATH", path));
+      const dryRun = Boolean(values["dry-run"]);
+      // A symlinked history is refused whether or not this is a dry run.
+      const file = existsSync(state) ? inside(state, "history.jsonl") : join(state, "history.jsonl");
+      const change = () => {
+        let text = "";
+        try {
+          text = readFileSync(file, "utf8");
+        } catch (e) {
+          if ((e as { code?: string }).code !== "ENOENT") throw new Failure(`cannot read ${file}: ${reason(e)}`);
+        }
+        // A line that does not parse is kept: unknown, never gone.
+        const lines = text.split("\n").filter((l) => l !== "");
+        const kept = lines.filter((l) => {
+          try {
+            return (JSON.parse(l) as { path?: unknown }).path !== target;
+          } catch {
+            return true;
+          }
+        });
+        const removed = lines.length - kept.length;
+        if (removed && !dryRun) replaceFile(state, "history.jsonl", kept.map((l) => `${l}\n`).join(""));
+        return removed;
+      };
+      const removed = dryRun || !existsSync(state) ? change() : withLock(state, "history.jsonl", change);
+      const verb = !removed ? "not recorded" : dryRun ? "would forget" : "forgot";
+      emit(values, { path: target, removed, changed: removed > 0, dryRun }, () => `${verb} ${target}`);
       return EXIT.ok;
     },
   },
@@ -417,14 +576,15 @@ try {
   process.exitCode = await main(argv);
 } catch (e) {
   const usage = e instanceof UsageError;
+  const busy = e instanceof Busy;
   const message = e instanceof Error ? e.message : String(e);
   // A Failure is expected and its message is enough; anything else is a bug,
   // so keep the stack for whoever reports it.
-  if (!(usage || e instanceof Failure) && e instanceof Error && e.stack) console.error(e.stack);
+  if (!(usage || busy || e instanceof Failure) && e instanceof Error && e.stack) console.error(e.stack);
   console.error(`${NAME}: ${message}`);
   if (usage) console.error(`Run '${NAME} --help' for usage.`);
   // Under --json a failure is JSON too (rubric A5). The only place argv is
   // searched by hand: parsing may have failed before it saw --json.
   if (argv.includes("--json")) console.log(JSON.stringify({ error: message, usage }));
-  process.exitCode = usage ? EXIT.usage : EXIT.failed;
+  process.exitCode = usage ? EXIT.usage : busy ? EXIT.busy : EXIT.failed;
 }

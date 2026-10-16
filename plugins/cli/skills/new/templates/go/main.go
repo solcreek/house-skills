@@ -9,11 +9,15 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/spf13/cobra"
@@ -28,9 +32,10 @@ const (
 	exitFailed  = 1
 	exitUsage   = 2
 	exitPartial = 3
+	exitBusy    = 4
 )
 
-const exitHelp = "Exit codes: 0 ok, 1 failed, 2 usage, 3 partial"
+const exitHelp = "Exit codes: 0 ok, 1 failed, 2 usage, 3 partial, 4 busy"
 
 // usageError marks a mistake in the invocation: exit 2, a short message.
 type usageError struct{ error }
@@ -38,12 +43,17 @@ type usageError struct{ error }
 // partialError carries a result that is already printed: exit 3.
 type partialError struct{ error }
 
+// busyError: another run holds a lock this one needs; nothing changed, retry
+// (exit 4).
+type busyError struct{ error }
+
 var asJSON bool
 
 func newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "tool",
 		Short:   "One line on what it is for",
+		Example: "  tool files --json\n  tool describe",
 		Version: version,
 		// cobra prints the whole usage on every error, and exits 1 for a bad
 		// flag; main prints a short message and exits 2 instead (rubric D3, E3).
@@ -101,7 +111,7 @@ func newRoot() *cobra.Command {
 				return fmt.Errorf("not a directory: %s", given)
 			}
 			// Walk the real path: WalkDir does not follow a symlinked root, and
-			// paths then compare with the tool's own homes.
+			// paths then compare with this CLI's own homes.
 			root, err := filepath.EvalSymlinks(given)
 			if err != nil {
 				return fmt.Errorf("cannot read %s: %s", given, cause(err))
@@ -207,7 +217,7 @@ func newRoot() *cobra.Command {
 				}
 				f.Close()
 			}
-			// State: what this tool created, kept across runs.
+			// State: what this CLI created, kept across runs.
 			recorded := changed && !dryRun && appendState("history.jsonl", map[string]string{"path": target})
 			verb := map[bool]string{true: "created", false: "exists"}[changed]
 			if changed && dryRun {
@@ -218,6 +228,89 @@ func newRoot() *cobra.Command {
 	}
 	mutating(touch)
 	root.AddCommand(touch)
+
+	forget := &cobra.Command{
+		Use:     "forget PATH",
+		Short:   "Remove a file from what touch has created",
+		Long:    "Remove a file from what touch has created.\nChanges things: pass --dry-run to preview, --yes to apply.",
+		Example: "  tool forget notes.txt --dry-run\n  tool forget notes.txt --yes --json",
+		Args:    usageArgs(cobra.ExactArgs(1)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dryRun, _ := change(cmd)
+			// Writing state is this command's action, so failing to is failing.
+			state := home("state")
+			if state == "" {
+				return errors.New("no home directory; set TOOL_HOME or XDG_STATE_HOME")
+			}
+			path, err := plain("PATH", args[0])
+			if err != nil {
+				return err
+			}
+			target, err := recorded(path)
+			if err != nil {
+				return err
+			}
+			// A symlinked history is refused whether or not this is a dry run.
+			file := filepath.Join(state, "history.jsonl")
+			if _, err := os.Stat(state); err == nil {
+				if file, err = inside(state, "history.jsonl"); err != nil {
+					return err
+				}
+			}
+			edit := func() (int, error) {
+				b, err := os.ReadFile(file)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return 0, fmt.Errorf("cannot read %s: %s", file, cause(err))
+				}
+				// A line that does not parse is kept: unknown, never gone.
+				var lines, kept []string
+				for _, l := range strings.Split(string(b), "\n") {
+					if l == "" {
+						continue
+					}
+					lines = append(lines, l)
+					// Exact keys: a struct would also match "Path".
+					var entry map[string]any
+					if json.Unmarshal([]byte(l), &entry) != nil || entry["path"] != target {
+						kept = append(kept, l)
+					}
+				}
+				removed := len(lines) - len(kept)
+				if removed > 0 && !dryRun {
+					data := ""
+					for _, l := range kept {
+						data += l + "\n"
+					}
+					if err := replaceFile(state, "history.jsonl", []byte(data)); err != nil {
+						return 0, err
+					}
+				}
+				return removed, nil
+			}
+			var removed int
+			if _, statErr := os.Stat(state); dryRun || statErr != nil {
+				removed, err = edit()
+			} else {
+				err = withLock(state, "history.jsonl", func() error {
+					var e error
+					removed, e = edit()
+					return e
+				})
+			}
+			if err != nil {
+				return err
+			}
+			verb := "forgot"
+			if removed == 0 {
+				verb = "not recorded"
+			} else if dryRun {
+				verb = "would forget"
+			}
+			return output(cmd, map[string]any{"path": target, "removed": removed, "changed": removed > 0, "dryRun": dryRun}, verb+" "+target)
+		},
+	}
+	mutating(forget)
+	root.AddCommand(forget)
 
 	root.AddCommand(&cobra.Command{
 		Use:     "describe",
@@ -353,8 +446,8 @@ func home(kind string) string {
 	return filepath.Join(base, "tool")
 }
 
-// homes is the tool's own directories that exist, by real path: a walk
-// skips them (conventions: Paths), so a TOOL_HOME inside the tree is not
+// homes is this CLI's own directories that exist, by real path: a walk
+// skips them (conventions: Paths), so TOOL_HOME inside the tree is not
 // listed.
 func homes() map[string]bool {
 	own := map[string]bool{}
@@ -386,25 +479,126 @@ func appendState(name string, entry any) bool {
 		return false
 	}
 	err := os.MkdirAll(state, 0o700)
-	var file string
 	if err == nil {
-		file, err = inside(state, name)
-	}
-	if err == nil {
-		var f *os.File
-		if f, err = os.OpenFile(file, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600); err == nil {
+		// Under the lock replaceFile takes, so an append never lands in a file
+		// that is being renamed away.
+		err = withLock(state, name, func() error {
+			file, err := inside(state, name)
+			if err != nil {
+				return err
+			}
+			f, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+			if err != nil {
+				return err
+			}
 			line, _ := json.Marshal(entry)
 			_, err = f.Write(append(line, '\n'))
 			if cerr := f.Close(); err == nil {
 				err = cerr
 			}
-		}
+			return err
+		})
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tool: warning: not recorded in %s: %s\n", filepath.Join(state, name), cause(err))
 		return false
 	}
 	return true
+}
+
+// ours is what to remove if the run is interrupted: a temp file it made
+// (rubric E5). main's signal handler empties it; the kernel drops its lock.
+var ours sync.Map
+
+// withLock runs fn holding the OS's lock on dir/name.lock (conventions:
+// State): flock, or LockFileEx on Windows (lock_*.go). The kernel releases it
+// when the process ends, so a crash leaves nothing stale and no pid can be
+// reused. The file itself stays. After 2 s of another run holding it: busy,
+// exit 4.
+func withLock(dir, name string, fn func() error) error {
+	path, err := inside(dir, name+".lock")
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("cannot lock %s: %s", path, cause(err))
+	}
+	defer f.Close()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		ok, err := tryLock(f)
+		if err != nil {
+			return fmt.Errorf("cannot lock %s: %s", path, cause(err))
+		}
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			return busyError{fmt.Errorf("%s is locked by another run; retry", filepath.Join(dir, name))}
+		}
+	}
+	defer unlock(f)
+	return fn()
+}
+
+// recorded is a path as touch records it: the real path of its directories
+// and the name, so forget finds it however the caller spells the directories
+// (a symlink, macOS's /tmp), even once they are deleted: the longest part
+// that still exists is resolved and the rest kept as written. The name
+// itself is compared as given (no case or Unicode folding).
+func recorded(path string) (string, error) {
+	full, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	var rest []string
+	for p := full; ; {
+		up := filepath.Dir(p)
+		if up == p {
+			return full, nil
+		}
+		rest = append([]string{filepath.Base(p)}, rest...)
+		if real, err := filepath.EvalSymlinks(up); err == nil {
+			return filepath.Join(append([]string{real}, rest...)...), nil
+		}
+		p = up
+	}
+}
+
+// replaceFile replaces dir/name with data (conventions: State): a uniquely
+// named temp file beside it, given the target's mode (a new file 0600),
+// renamed over it. The rename never follows a symlink; inside refused one.
+func replaceFile(dir, name string, data []byte) error {
+	target, err := inside(dir, name)
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(0o600)
+	if fi, err := os.Stat(target); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	f, err := os.CreateTemp(dir, "."+name+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("cannot write %s: %s", target, cause(err))
+	}
+	temp := f.Name()
+	ours.Store(temp, true)
+	defer ours.Delete(temp)
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(temp, mode)
+	}
+	if err == nil {
+		err = os.Rename(temp, target)
+	}
+	if err != nil {
+		os.Remove(temp)
+		return fmt.Errorf("cannot write %s: %s", target, cause(err))
+	}
+	return nil
 }
 
 // wholeNumber is a flag that takes base-10 digits only, as in every template:
@@ -498,7 +692,7 @@ func describe(c *cobra.Command) map[string]any {
 	d := map[string]any{"name": c.Name(), "summary": c.Short, "flags": flags, "commands": subs}
 	if !c.HasParent() {
 		d["version"] = version
-		d["exitCodes"] = map[string]int{"ok": exitOK, "failed": exitFailed, "usage": exitUsage, "partial": exitPartial}
+		d["exitCodes"] = map[string]int{"ok": exitOK, "failed": exitFailed, "usage": exitUsage, "partial": exitPartial, "busy": exitBusy}
 		return d
 	}
 	// Positionals from Use ("files [DIR]"): [X] is optional.
@@ -525,6 +719,20 @@ func describe(c *cobra.Command) map[string]any {
 }
 
 func main() {
+	// cobra runs only the nearest PersistentPreRunE: a subcommand defining its
+	// own would silently skip the root's mutating guard. This runs them all.
+	cobra.EnableTraverseRunHooks = true
+	// Ctrl-C removes a temp file this run made (rubric E5).
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-signals
+		ours.Range(func(p, _ any) bool { os.Remove(p.(string)); return true })
+		if s == os.Interrupt {
+			os.Exit(130)
+		}
+		os.Exit(143)
+	}()
 	root := newRoot()
 	root.SetOut(os.Stdout) // help on stdout (rubric E1)
 	root.SetErr(os.Stderr)
@@ -538,6 +746,7 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "tool: %v\n", err)
 	usage := errors.As(err, new(usageError))
+	busy := errors.As(err, new(busyError))
 	if usage {
 		fmt.Fprintln(os.Stderr, "Run 'tool --help' for usage.")
 	}
@@ -548,6 +757,9 @@ func main() {
 	}
 	if usage {
 		os.Exit(exitUsage)
+	}
+	if busy {
+		os.Exit(exitBusy)
 	}
 	os.Exit(exitFailed)
 }

@@ -47,7 +47,7 @@ tools meet these rules: exit codes, flag names, JSON shapes, paths, state.
 | id | tier | rule | check |
 |---|---|---|---|
 | A1 | should (must for agent-called tools) | Every command that reports something has `--json`: one document on stdout (or NDJSON, one value per line, for a stream it documents as such), stable field names, the same exit codes. | `run-json` (`--lines` for NDJSON) |
-| A2 | must | Never waits on stdin or a prompt when stdin is not a terminal. | every probe run (a timeout fails it) |
+| A2 | must | Never prompts, and never waits on stdin unless the command is documented to read it (a secret, a payload). Run with stdin at EOF, it finishes. | every probe run (a timeout fails it) |
 | A3 | must | No colour, pager, spinner or cursor control when the stream is not a terminal, and `NO_COLOR` is honoured. | probe `no-color-piped`, `no-color-env` |
 | A4 | should | An error says what to do next: the exact command, flag or file. "Not found" names what was looked for and where. | **read** error strings |
 | A5 | should | Under `--json`, a failure is still JSON (`{"error": …}` or a state field) with a non-zero exit, so the caller never parses prose. | **run** |
