@@ -1,3 +1,7 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec node --no-warnings "$(dirname "${BASH_SOURCE[0]}")/../src/main.ts" "$@"
+#!/usr/bin/env -S node --no-warnings
+// The entry point: turn on Node's compile cache (in the system temp
+// directory), then load the TypeScript source, stripped of types by Node.
+import { enableCompileCache } from "node:module";
+
+enableCompileCache?.();
+await import("../src/main.ts");
