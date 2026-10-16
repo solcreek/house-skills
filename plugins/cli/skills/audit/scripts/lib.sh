@@ -1,5 +1,6 @@
 # Sourced by probe and run-json (bash 3.2). Expects $tmp, $cwd, $timeout,
-# $results and $offline to be set by the caller.
+# $results and $offline to be set by the caller, and the array runenv
+# (KEY=VALUE pairs from --env; may be empty).
 
 # With --offline, every run gets proxies that point nowhere and git that
 # refuses every transport. Best effort, not a sandbox: a tool that ignores
@@ -16,7 +17,8 @@ run() {
   local extra=""
   [ -n "${offline:-}" ] && extra=$OFFLINE_ENV
   # shellcheck disable=SC2086
-  (cd "$cwd" && env -u FORCE_COLOR -u CLICOLOR_FORCE -u NO_COLOR $extra \
+  # ${a[@]+"${a[@]}"}: an empty array under set -u in bash 3.2.
+  (cd "$cwd" && env -u FORCE_COLOR -u CLICOLOR_FORCE -u NO_COLOR $extra ${runenv[@]+"${runenv[@]}"} \
     perl -MTime::HiRes=time -e '
       my ($secs, $meta) = (shift, shift);
       my $t0 = time;
@@ -74,6 +76,11 @@ demote() {
   jq -c --arg id "$1" --arg d "$2" \
     'if .id == $id then .status = "fail" | .detail = $d else . end' "$results" > "$tmp/demote" &&
     mv "$tmp/demote" "$results"
+}
+
+# envarg KEY=VALUE: append to runenv, or exit 64 if it is not one.
+envarg() {
+  case "$1" in [A-Za-z_]*=*) runenv+=("$1") ;; *) usage ;; esac
 }
 
 # resolve CMD: an absolute path for a path, as given for a name on PATH.

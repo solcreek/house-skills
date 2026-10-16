@@ -8,6 +8,8 @@ case "${1:-}" in
   --version) echo "good 1.2.3" ;;
   --json) echo '{"ok": true}' ;;
   --lines) echo '{"n": 1}'; echo '{"n": 2}' ;;
+  --fail-bare) echo '{"ok": false}'; exit 1 ;;
+  --fail-json) echo '{"error": "it broke", "usage": false}'; echo "good: it broke" >&2; exit 1 ;;
   --env) printf '{"proxy": "%s", "git": "%s"}\n' "${HTTPS_PROXY:-}" "${GIT_ALLOW_PROTOCOL:-}" ;;
   -*) echo "good: unknown flag $1 (see good --help)" >&2; exit 2 ;;
   '') echo "did the thing" ;;

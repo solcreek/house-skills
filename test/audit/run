@@ -115,6 +115,15 @@ runjson "json: NDJSON with --lines" 0 "$(is json-valid pass)" --lines -- "$fx/go
 runjson "json: NDJSON without --lines" 1 "$(says json-valid 'pass --lines')" -- "$fx/good" --lines
 runjson "json: --lines catches a bad line" 1 "$(says json-valid '1 of 1 lines')" --lines -- "$fx/hang" --json
 
+runjson "json-error: failure without an error" 1 "$(says json-error 'without')" -- "$fx/good" --fail-bare
+runjson "json-error: failure with an error" 0 "$(is json-error pass)" -- "$fx/good" --fail-json
+runjson "json-error: skipped on success" 0 "$(is json-error skip)" -- "$fx/good" --json
+runjson "--expect-exit: match" 0 "$(is exit pass)" --expect-exit 1 -- "$fx/good" --fail-json
+runjson "--expect-exit: mismatch" 1 "$(says exit 'expected 0')" --expect-exit 0 -- "$fx/good" --fail-json
+runjson "--env reaches the tool" 0 \
+  '.checks[0].run.stdout | fromjson | .proxy == "http://x:1"' --env HTTPS_PROXY=http://x:1 -- "$fx/good" --env
+probe "--env on probe" 0 '.summary == {pass: 10}' --env A=1 --env B=2 -- "$fx/good"
+
 # The working directory is empty and temporary unless the caller names one.
 probe "cwd: temporary by default" 0 '.cwd == "(a temporary empty directory)"' -- "$fx/good"
 probe "cwd: given one is used" 0 ".cwd == \"$tmp\"" --cwd "$tmp" -- "$fx/good"
@@ -133,7 +142,7 @@ for s in probe run-json; do
     if [ "$got" = 64 ]; then pass=$((pass + 1)); else echo "FAIL $s usage '$args': exit $got"; fail=$((fail + 1)); fi
   done
 done
-for c in "probe --lines -- ls" "run-json --skip x -- ls"; do
+for c in "probe --lines -- ls" "run-json --skip x -- ls" "probe --env NOEQUALS -- ls" "run-json --expect-exit x -- ls"; do
   got=0
   # shellcheck disable=SC2086
   "$scripts/"$c > /dev/null 2>&1 || got=$?
