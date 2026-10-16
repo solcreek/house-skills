@@ -19,7 +19,8 @@ skip D1 (`--version`) and D5 (completion).
 Based on [clig.dev](https://clig.dev) and Justin Poehnelt's
 [Rewrite your CLI for AI agents](https://justin.poehnelt.com/posts/rewrite-your-cli-for-ai-agents/),
 narrowed to what we enforce. Where we differ from the latter, see "Deliberately
-not adopted" at the end.
+not adopted" at the end. [conventions.md](conventions.md) says how our own
+tools meet these rules: exit codes, flag names, JSON shapes, paths, state.
 
 ## S. Safe to invoke
 
@@ -27,7 +28,7 @@ not adopted" at the end.
 |---|---|---|---|
 | S1 | must | `--help` and `-h` print help and exit 0 **before any side effect**, on every command and subcommand. | probe `help-long`, `help-short`; **read** each subcommand's arg handling |
 | S2 | must | An unknown flag is a usage error. It is never ignored and never forwarded to another program unless after an explicit `--`. | probe `unknown-flag`; **read** for subcommands |
-| S3 | must | A destructive or outward action (delete, push, publish, pay, send) needs `--yes` or a TTY confirmation, and has a dry run (`--dry-run`, or dry by default). Without a TTY it never prompts: it fails and names the flag. | **read** |
+| S3 | must for destructive or outward actions; should for any other change | A command that changes anything besides its own output has a dry run. A destructive or outward one (delete, overwrite, push, publish, pay, send) also needs `--yes` or a TTY confirmation. Without a TTY it never prompts: it fails and names the flag. Our tools require `--dry-run` or `--yes` on every mutating command (conventions). | **read** |
 | S4 | must | Secrets never go in argv (visible in `ps` and shell history): env, stdin or a file. Auth works headless (a token or credentials-file env var); a browser flow is only a fallback for people. | **read** |
 | S5 | should | Rerunning is safe: an action already done reports success ("already open"), not an error. | **read** |
 
@@ -51,9 +52,9 @@ not adopted" at the end.
 | A4 | should | An error says what to do next: the exact command, flag or file. "Not found" names what was looked for and where. | **read** error strings |
 | A5 | should | Under `--json`, a failure is still JSON (`{"error": …}` or a state field) with a non-zero exit, so the caller never parses prose. | **run** |
 | A6 | should | Output is bounded. Lists are capped and say so ("30 of 212"), with a flag to raise the cap. Each item is one line, or a JSON element. A command returning large records takes `--fields` to select what comes back; a stream or paginated list is NDJSON, one object per line. | **read** |
-| A7 | should | "Could not check" never looks like "nothing found". Empty results and failures to look have different exit codes or states. | **read** |
+| A7 | should | "Could not check" never looks like "nothing found". Empty results and failures to look have different exit codes or states; a partial result says what it could not read (conventions: exit 3, `problems`). | **read** |
 | A8 | taste | Output is deterministic: sorted, no timestamps or colour unless asked, so reruns diff cleanly. | **run** |
-| A9 | should (must when an argument becomes a path, URL or query) | Inputs are treated as adversarial: an agent hallucinates where a person typos. Reject control characters; reject `?`, `#` and `%` in resource ids; keep output paths inside the intended directory (canonicalize, refuse `..` escapes); percent-encode path segments. | **read**; **run** with a bad id under `--dry-run` |
+| A9 | should (must when an argument becomes a path, URL or query) | Inputs are treated as adversarial: an agent hallucinates where a person typos. Reject control characters; keep output paths inside the root the command writes to, after resolving symlinks; for ids that go into a URL, reject `?`, `#` and `%` and percent-encode path segments. A missing input path is a failure naming it, not a usage error (conventions). | **read**; **run** with a bad path or id under `--dry-run` |
 | A10 | should for agent-called tools with several commands | The command surface is introspectable at runtime: a `describe` command (or `help --json`, `schema <command>`) prints commands, flags, types, defaults and exit codes, generated from the same definitions as `--help` so it cannot drift. | **run** |
 | A11 | should for tools wrapping an API | Requests can be given whole as JSON (`--json-input FILE`, or `-` for stdin) instead of only through bespoke flags, so nested shapes need no flag design. | **read** |
 | A12 | should for agent-called tools | The tool ships its agent context: a skill or `AGENTS.md` section stating which commands mutate, to dry-run first, which flags to always pass (`--json`, `--fields`) and what each exit code means. Help teaches people; this teaches agents the invariants they will not infer. | **read** |
