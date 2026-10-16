@@ -343,6 +343,11 @@ describe("contract", { concurrency: true }, () => {
     symlinkSync(join(cwd, "real"), join(cwd, "link"));
     await run(["touch", "link/n", "--yes"], { cwd, env });
     assert.equal(json(await run(["forget", "link/n", "--yes", "--json"], { cwd, env })).removed, 1);
+    // Its directory deleted: the rest still resolves (tmpdir is a symlink on macOS).
+    mkdirSync(join(cwd, "sub"));
+    await run(["touch", "sub/f", "--yes"], { cwd, env });
+    rmSync(join(cwd, "sub"), { recursive: true });
+    assert.equal(json(await run(["forget", "sub/f", "--yes", "--json"], { cwd, env })).removed, 1);
   });
 
   test("describe lists every command, its args and flags as --help shows them", async () => {

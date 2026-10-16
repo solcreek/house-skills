@@ -22,7 +22,8 @@ Keep all three when adding commands. Wrap every `Args:` in `usageArgs(...)`.
 - **Rewriting a file**: `withLock(dir, name, fn)` around `replaceFile(dir,
   name, data)`; a held lock is `busyError`, exit 4. `main`'s signal handler
   removes the run's temp files on Ctrl-C. The lock is `flock`
-  (`lock_unix.go`) or kernel32's `LockFileEx` (`lock_windows.go`, called
+  (`lock_unix.go`: darwin, the BSDs, illumos and linux; solaris and aix
+  have no `syscall.Flock`) or kernel32's `LockFileEx` (`lock_windows.go`, called
   through `syscall` so go.mod needs no `golang.org/x/sys`); the kernel drops
   it when the process ends. The Windows file builds and vets; it has not
   been run on Windows (verified 2026-10-16).

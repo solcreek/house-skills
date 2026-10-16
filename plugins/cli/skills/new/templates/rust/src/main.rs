@@ -535,19 +535,25 @@ fn replace_file(dir: &Path, name: &str, data: &[u8]) -> anyhow::Result<()> {
     result.map_err(|e| anyhow!("cannot write {}: {}", target.display(), reason(&e)))
 }
 
-// The path as touch records it: the parent's real path and the name, so
-// forget finds it however the caller spells it (a symlinked directory,
-// macOS's /tmp). A parent that does not exist is taken as written.
+// The path as touch records it: the real path of its directories and the
+// name, so forget finds it however the caller spells the directories (a
+// symlink, macOS's /tmp), even once they are deleted: the longest part that
+// still exists is resolved and the rest kept as written. The name itself is
+// compared as given (no case or Unicode folding).
 fn recorded(path: &Path) -> anyhow::Result<String> {
     let full = lexical(&std::path::absolute(path)?);
-    let parent = full.parent().unwrap_or(Path::new("/"));
-    let parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
-    Ok(match full.file_name() {
-        Some(name) => parent.join(name),
-        None => parent,
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut p = full.as_path();
+    while let (Some(up), Some(name)) = (p.parent(), p.file_name()) {
+        rest.push(name);
+        if let Ok(real) = up.canonicalize() {
+            let mut out = real;
+            out.extend(rest.iter().rev());
+            return Ok(out.display().to_string());
+        }
+        p = up;
     }
-    .display()
-    .to_string())
+    Ok(full.display().to_string())
 }
 
 // The same definitions as --help, as data (rubric A10), in the shape every

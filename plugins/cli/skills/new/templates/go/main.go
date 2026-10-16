@@ -541,18 +541,28 @@ func withLock(dir, name string, fn func() error) error {
 	return fn()
 }
 
-// recorded is a path as touch records it: the parent's real path and the
-// name, so forget finds it however the caller spells it (a symlinked
-// directory, macOS's /tmp). A parent that does not exist is taken as written.
+// recorded is a path as touch records it: the real path of its directories
+// and the name, so forget finds it however the caller spells the directories
+// (a symlink, macOS's /tmp), even once they are deleted: the longest part
+// that still exists is resolved and the rest kept as written. The name
+// itself is compared as given (no case or Unicode folding).
 func recorded(path string) (string, error) {
 	full, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	if parent, err := filepath.EvalSymlinks(filepath.Dir(full)); err == nil {
-		return filepath.Join(parent, filepath.Base(full)), nil
+	var rest []string
+	for p := full; ; {
+		up := filepath.Dir(p)
+		if up == p {
+			return full, nil
+		}
+		rest = append([]string{filepath.Base(p)}, rest...)
+		if real, err := filepath.EvalSymlinks(up); err == nil {
+			return filepath.Join(append([]string{real}, rest...)...), nil
+		}
+		p = up
 	}
-	return full, nil
 }
 
 // replaceFile replaces dir/name with data (conventions: State): a uniquely

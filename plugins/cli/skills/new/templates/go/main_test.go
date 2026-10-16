@@ -451,6 +451,13 @@ func TestForgetFindsAPathHoweverItIsSpelled(t *testing.T) {
 	if v := decode(t, runIn(t, dir, home, "forget", "link/n", "--yes", "--json").out); v["removed"] != 1.0 {
 		t.Errorf("forget link/n: %v", v)
 	}
+	// Its directory deleted: the rest still resolves (tmpdir is a symlink on macOS).
+	must(t, os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+	runIn(t, dir, home, "touch", "sub/f", "--yes")
+	must(t, os.RemoveAll(filepath.Join(dir, "sub")))
+	if v := decode(t, runIn(t, dir, home, "forget", "sub/f", "--yes", "--json").out); v["removed"] != 1.0 {
+		t.Errorf("forget sub/f after rm sub: %v", v)
+	}
 }
 
 func TestDescribe(t *testing.T) {

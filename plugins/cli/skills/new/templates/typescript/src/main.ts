@@ -185,18 +185,31 @@ function withLock<T>(dir: string, name: string, fn: () => T): T {
     } catch (e) {
       if ((e as { code?: string }).code !== "EEXIST") throw new Failure(`cannot lock ${lock}: ${reason(e)}`);
     }
-    let age: number;
+    let judged;
     try {
-      age = Date.now() - statSync(lock).mtimeMs;
+      judged = statSync(lock);
     } catch {
       continue; // released meanwhile
     }
-    if (age > STALE_MS) {
+    if (Date.now() - judged.mtimeMs > STALE_MS) {
       const away = `${lock}.stale.${token}`;
       try {
         renameSync(lock, away);
-        rmSync(away, { recursive: true, force: true });
-      } catch {} // another run took it over first
+      } catch {
+        continue; // another run took it over first
+      }
+      // The rename moves whatever is at the path now, which may be a lock
+      // another run made after the stat: then it goes back, untouched.
+      if (statSync(away).ino !== judged.ino) {
+        try {
+          renameSync(away, lock);
+        } catch {
+          rmSync(away, { recursive: true, force: true });
+          throw new Busy(`${join(dir, name)} changed hands while being taken over; retry`);
+        }
+        continue;
+      }
+      rmSync(away, { recursive: true, force: true });
       continue;
     }
     if (Date.now() > deadline) throw new Busy(`${join(dir, name)} is locked by another run; retry`);
@@ -213,15 +226,22 @@ function withLock<T>(dir: string, name: string, fn: () => T): T {
   }
 }
 
-// The path as touch records it: the parent's real path and the name, so
-// forget finds it however the caller spells it (a symlinked directory,
-// macOS's /tmp). A parent that does not exist is taken as written.
+// The path as touch records it: the real path of its directories and the
+// name, so forget finds it however the caller spells the directories (a
+// symlink, macOS's /tmp), even once they are deleted: the longest part that
+// still exists is resolved and the rest kept as written. The name itself is
+// compared as given (no case or Unicode folding).
 function recorded(path: string): string {
-  const full = resolve(path);
-  try {
-    return join(realpathSync(dirname(full)), basename(full));
-  } catch {
-    return full;
+  const rest: string[] = [];
+  for (let p = resolve(path); ; ) {
+    const up = dirname(p);
+    rest.unshift(basename(p));
+    if (up === p) return resolve(path);
+    try {
+      return join(realpathSync(up), ...rest);
+    } catch {
+      p = up;
+    }
   }
 }
 

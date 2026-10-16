@@ -350,6 +350,12 @@ fn forget_finds_a_path_however_it_is_spelled() {
     cli_in(d.path(), home.path()).args(["touch", "link/n", "--yes"]).assert().success();
     let v = json(&cli_in(d.path(), home.path()).args(["forget", "link/n", "--yes", "--json"]).output().unwrap().stdout);
     assert_eq!(v["removed"], 1);
+    // Its directory deleted: the rest still resolves (tmpdir is a symlink on macOS).
+    std::fs::create_dir(d.path().join("sub")).unwrap();
+    cli_in(d.path(), home.path()).args(["touch", "sub/f", "--yes"]).assert().success();
+    std::fs::remove_dir_all(d.path().join("sub")).unwrap();
+    let v = json(&cli_in(d.path(), home.path()).args(["forget", "sub/f", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!(v["removed"], 1);
 }
 
 #[test]

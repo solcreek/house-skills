@@ -153,8 +153,9 @@ files, caches, git state, remote services. In `describe` it has
   releases it when the process ends, so a crash leaves nothing stale and no
   pid can be reused. Never a pid file: one written in two steps can be read
   empty, and removing a "stale" one races its owner. Where there is no OS
-  lock (Node), the lock is a directory made with `mkdir`, taken over only
-  once it is older than any run holds it (10 s). Wait up to 2 s, then exit 4
+  lock (Node), the lock is a directory made with `mkdir`, taken over once it
+  is 10 s old: far longer than a run holds it, though a run stopped that long
+  (Ctrl-Z, a sleeping laptop) loses it. Wait up to 2 s, then exit 4
   (busy). The templates' `withLock` and `replaceFile` do this, and their
   tests run concurrent writers and check nothing was lost.
 - **Reading state back**, a line that does not parse is kept as it is,
