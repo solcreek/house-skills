@@ -80,7 +80,10 @@ else
 fi
 if [ "$exit" = 0 ]; then
   record json-error skip "exit 0"
-elif [ "$exit" = 3 ] && jq -se 'length == 1 and (.[0].problems | type == "array" and length > 0)' "$tmp/json.out" > /dev/null 2>&1; then
+elif [ "$exit" = 3 ] && jq -se 'length == 1 and (.[0] | type == "object")
+    and (.[0].problems | type == "array" and length > 0)
+    and all(.[0].problems[]; type == "object" and (.input | type == "string")
+                             and (.error | type == "string" and length > 0))' "$tmp/json.out" > /dev/null 2>&1; then
   record json-error pass "exit 3 (partial) with problems"
 elif jq -se 'length == 1 and (.[0] | type == "object") and (.[0].error | type == "string" and length > 0)' "$tmp/json.out" > /dev/null 2>&1; then
   record json-error pass "exit $exit with an error string"

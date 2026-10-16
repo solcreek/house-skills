@@ -134,6 +134,7 @@ runjson "--offline wins over --env" 0 \
 runjson "--env PATH= does not hide perl or the tool" 0 \
   "$(is json-valid pass) and (.checks[0].run.stdout | fromjson | .path == \"/nonexistent\")" --env PATH=/nonexistent -- good-on-path
 runjson "json-error: a partial result with problems" 0 "$(is json-error pass)" --expect-exit 3 -- "$fx/good" --partial
+runjson "json-error: exit 3 with malformed problems" 1 "$(says json-error 'problems')" -- "$fx/good" --partial-junk
 runjson "json-error: exit 3 without problems" 1 "$(says json-error 'problems')" -- "$fx/good" --partial-bare
 runjson "json-error: an empty error fails" 1 "$(says json-error 'non-empty')" -- "$fx/good" --fail-empty
 
