@@ -1,5 +1,5 @@
 // Conventions: ../audit/references/conventions.md in the cli plugin.
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, bail, Context};
@@ -28,8 +28,8 @@ enum Command {
         /// Who to greet
         name: String,
     },
-    /// Create an empty file under the current directory (changes things)
-    #[command(after_help = "Examples:\n  tool touch notes.txt --dry-run\n  tool touch notes.txt --yes --json")]
+    /// Create an empty file under the current directory
+    #[command(after_help = "Changes things: pass --dry-run to preview, --yes to apply.\n\nExamples:\n  tool touch notes.txt --dry-run\n  tool touch notes.txt --yes --json")]
     Touch {
         /// The file to create, inside the current directory
         path: PathBuf,
@@ -57,6 +57,19 @@ struct Change {
 const FAILED: u8 = 1;
 const USAGE: u8 = 2;
 
+/// A mistake in the invocation that clap cannot see (an empty or malformed
+/// value): exit 2, like clap's own usage errors.
+#[derive(Debug)]
+struct Usage(String);
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Usage {}
+
 fn main() -> ExitCode {
     let json_asked = std::env::args().any(|a| a == "--json");
     let cli = match Cli::try_parse() {
@@ -77,11 +90,15 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(code) => code,
         Err(e) => {
+            let usage = e.is::<Usage>();
             eprintln!("tool: {e:#}");
-            if cli.json {
-                println!("{}", json!({ "error": format!("{e:#}"), "usage": false }));
+            if usage {
+                eprintln!("Run 'tool --help' for usage.");
             }
-            ExitCode::from(FAILED)
+            if cli.json {
+                println!("{}", json!({ "error": format!("{e:#}"), "usage": usage }));
+            }
+            ExitCode::from(if usage { USAGE } else { FAILED })
         }
     }
 }
@@ -99,7 +116,11 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             // Already there is success with nothing changed (rubric S5).
             let changed = !target.exists();
             if changed && change.yes {
-                std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .with_context(|| format!("cannot create {}", target.display()))?;
             }
             let verb = if !changed { "exists" } else if change.dry_run { "would create" } else { "created" };
             let shown = target.display().to_string();
@@ -118,23 +139,45 @@ fn print(cli: &Cli, json: Value, text: &str) {
     }
 }
 
-// Control characters in an argument are refused (rubric A9).
+// An empty argument or a control character in one is a usage error (rubric A9).
 fn plain<'a>(what: &str, s: &'a str) -> anyhow::Result<&'a str> {
+    if s.is_empty() {
+        return Err(Usage(format!("{what} is empty")).into());
+    }
     if s.chars().any(|c| c.is_control()) {
-        bail!("{what} contains a control character");
+        return Err(Usage(format!("{what} contains a control character")).into());
     }
     Ok(s)
 }
 
-// An output path must land inside root once symlinks are resolved (rubric A9).
+// The file an output path names, refused unless it is plainly inside root
+// (rubric A9). Every template's inside() refuses the same things: a `..`
+// part, a trailing slash, the root itself, a parent that resolves outside
+// root, and a last part that is a symlink (dangling or not), so the write
+// can never follow one.
 fn inside(root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    let shown = path.display();
+    if path.components().any(|c| c == Component::ParentDir) {
+        bail!("{shown}: '..' is not allowed in an output path");
+    }
+    let raw = path.to_string_lossy();
+    if raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR) {
+        bail!("{shown}: names a directory, not a file");
+    }
     let real_root = root.canonicalize()?;
-    let parent = root.join(path.parent().unwrap_or(Path::new("")));
-    let parent = parent.canonicalize().with_context(|| format!("no such directory: {}", parent.display()))?;
-    let name = path.file_name().ok_or_else(|| anyhow!("{} names no file", path.display()))?;
+    let full = root.join(path);
+    let name = full.file_name().ok_or_else(|| anyhow!("{shown}: is {} itself", real_root.display()))?;
+    let parent = full.parent().unwrap_or(Path::new("/"));
+    let parent = parent.canonicalize().with_context(|| format!("{shown}: no such directory: {}", parent.display()))?;
     let target = parent.join(name);
-    if !target.starts_with(&real_root) || target == real_root {
-        bail!("{} is outside {}; tool writes only under the current directory", path.display(), real_root.display());
+    if target == real_root {
+        bail!("{shown}: is {} itself", real_root.display());
+    }
+    if !target.starts_with(&real_root) {
+        bail!("{shown}: outside {}; tool writes only under the current directory", real_root.display());
+    }
+    if target.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("{shown}: is a symlink; refusing to write through it");
     }
     Ok(target)
 }
@@ -147,8 +190,12 @@ fn describe_root() -> Value {
     let mut cmd = Cli::command();
     cmd.build();
     let mut d = describe(&cmd);
-    d["version"] = json!(cmd.get_version());
-    d["exitCodes"] = json!({ "ok": 0, "failed": FAILED, "usage": USAGE });
+    let root = d.as_object_mut().unwrap();
+    // The top level has no usage line or mutates of its own (describe.md).
+    root.remove("usage");
+    root.remove("mutates");
+    root.insert("version".into(), json!(cmd.get_version()));
+    root.insert("exitCodes".into(), json!({ "ok": 0, "failed": FAILED, "usage": USAGE }));
     d
 }
 

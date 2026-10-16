@@ -3,12 +3,15 @@
 # terminal unless NO_COLOR is set, and whenever FORCE_COLOR is (as Node does).
 b= r=
 if [ -n "${FORCE_COLOR:-}" ] || { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then b=$(printf '\033[1m') r=$(printf '\033[0m'); fi
+# GOOD_BREAK_HELP: lets a test see that --env reaches the tool.
+[ -n "${GOOD_BREAK_HELP:-}" ] && { echo "help is broken" >&2; exit 1; }
 case "${1:-}" in
   -h|--help) echo "${b}usage:${r} good [--json]"; echo; echo "Example: good --json" ;;
   --version) echo "good 1.2.3" ;;
   --json) echo '{"ok": true}' ;;
   --lines) echo '{"n": 1}'; echo '{"n": 2}' ;;
   --fail-bare) echo '{"ok": false}'; exit 1 ;;
+  --fail-empty) echo '{"error": ""}'; exit 3 ;;
   --fail-json) echo '{"error": "it broke", "usage": false}'; echo "good: it broke" >&2; exit 1 ;;
   --env) printf '{"proxy": "%s", "git": "%s"}\n' "${HTTPS_PROXY:-}" "${GIT_ALLOW_PROTOCOL:-}" ;;
   -*) echo "good: unknown flag $1 (see good --help)" >&2; exit 2 ;;

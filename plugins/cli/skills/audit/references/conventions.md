@@ -23,9 +23,9 @@ names something that does not exist (`show 123` with no item 123, a missing
 
 | flag | meaning |
 |---|---|
-| `-h`, `--help` | help on stdout, exit 0, before anything else |
-| `--version` | top level only: `NAME X.Y.Z` |
-| `--json` | one JSON document on stdout |
+| `-h`, `--help` | help on stdout, exit 0, before anything else; `NAME help COMMAND` is that command's help |
+| `--version` | top level only: `NAME X.Y.Z`. Never `-v`, which elsewhere means verbose (`-V` is clap's and fine) |
+| `--json` | one JSON document on stdout; accepted before or after the command |
 | `--dry-run` | a mutating command reports what it would change, and changes nothing |
 | `--yes` | a mutating command applies its change |
 | `--limit N` | cap a list at N items; `0` means no cap |
@@ -69,11 +69,15 @@ files, caches, git state, remote services. In `describe` it has
 
 - An input path resolves against the current directory. If it does not
   exist, that is failed (1), and the message names it.
-- An output path must land inside the root the command writes to (the
-  current directory, unless the command documents another). Resolve the
-  parent's real path, and refuse a path that escapes the root with failed
-  (1), naming the root.
-- Control characters in a path or id are a usage error (2).
+- An output path must name a file plainly inside the root the command
+  writes to (the current directory, unless the command documents another).
+  Refuse, with failed (1) naming the path: a `..` part, a trailing slash,
+  the root itself, a parent whose real path is outside the root, and a last
+  part that is a symlink, dangling or not. Then create with
+  create-only-if-absent (`wx`, `O_EXCL`, `create_new`), so even a race
+  cannot write through a link. The templates' `inside()` does all of this;
+  reuse it for every path a tool writes.
+- An empty path or id, or one with control characters, is a usage error (2).
 
 ## State
 

@@ -72,13 +72,19 @@ for stack in typescript rust go; do
     set -- $level
     lvl=$1; shift
     [ "$lvl" = top ] && lvl=
+    # startup is timing: on a loaded machine it can miss once. Retry only when
+    # it is the sole failure.
     # shellcheck disable=SC2086
-    if "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1; then ok
+    if "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1 ||
+       { jq -e '[.checks[] | select(.status == "fail") | .id] == ["startup"]' "$tmp/p" > /dev/null 2>&1 &&
+         "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1; }; then ok
     else no "$stack probe '$level': $(jq -c '[.checks[]? | select(.status == "fail") | [.id, .detail]]' "$tmp/p" 2>/dev/null || cat "$tmp/p")"; fi
   done
   if "$runjson" -- "$bin" greet Ada --json > "$tmp/p" 2>&1; then ok; else no "$stack greet --json"; fi
   # A mutating command under --dry-run is read-only; its failures are JSON too.
-  if "$runjson" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1; then ok; else no "$stack touch --dry-run --json: $(cat "$tmp/p")"; fi
+  rm -rf "$tmp/dry" && mkdir "$tmp/dry"
+  if "$runjson" --cwd "$tmp/dry" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1 && [ -z "$(ls -A "$tmp/dry")" ]; then ok
+  else no "$stack touch --dry-run: $(cat "$tmp/p"; ls -A "$tmp/dry")"; fi
   if "$runjson" --expect-exit 2 -- "$bin" touch x --json > "$tmp/p" 2>&1; then ok; else no "$stack touch without --yes: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   if "$runjson" --expect-exit 1 -- "$bin" touch ../x --yes --json > "$tmp/p" 2>&1; then ok; else no "$stack touch ../x: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # describe: one document, in the shared shape (references/describe.md).

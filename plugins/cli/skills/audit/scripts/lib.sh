@@ -12,14 +12,18 @@ NO_PROXY= no_proxy= GIT_ALLOW_PROTOCOL=none"
 # run NAME ARGV... : runs ARGV in $cwd under the timeout, stdin at EOF, with
 # no colour forcing or NO_COLOR from the caller. Kills the whole process
 # group on timeout. Leaves $tmp/NAME.{out,err,meta}; meta is "EXIT MS TIMEDOUT".
+# perl by its absolute path: --env PATH=… must not hide it.
+perl_bin=$(command -v perl || true)
+
 run() {
   local name=$1; shift
   local extra=""
   [ -n "${offline:-}" ] && extra=$OFFLINE_ENV
-  # shellcheck disable=SC2086
+  # The caller's --env first, then --offline's, so --offline always wins.
   # ${a[@]+"${a[@]}"}: an empty array under set -u in bash 3.2.
-  (cd "$cwd" && env -u FORCE_COLOR -u CLICOLOR_FORCE -u NO_COLOR $extra ${runenv[@]+"${runenv[@]}"} \
-    perl -MTime::HiRes=time -e '
+  # shellcheck disable=SC2086
+  (cd "$cwd" && env -u FORCE_COLOR -u CLICOLOR_FORCE -u NO_COLOR ${runenv[@]+"${runenv[@]}"} $extra \
+    "$perl_bin" -MTime::HiRes=time -e '
       my ($secs, $meta) = (shift, shift);
       my $t0 = time;
       my $pid = fork // die "fork: $!";
@@ -34,6 +38,8 @@ run() {
       my $code = ($st & 127) ? 128 + ($st & 127) : $st >> 8;
       open my $fh, ">", $meta or die; printf $fh "%d %d %d\n", $code, (time - $t0) * 1000, $timed;
     ' "$timeout" "$tmp/$name.meta" "$@" < /dev/null > "$tmp/$name.out" 2> "$tmp/$name.err") || true
+  # No meta: the runner itself never started. Report it as could-not-execute.
+  [ -f "$tmp/$name.meta" ] || echo "127 0 0" > "$tmp/$name.meta"
 }
 
 # bytes FILE: size without the padding BSD wc adds.
@@ -78,9 +84,12 @@ demote() {
     mv "$tmp/demote" "$results"
 }
 
-# envarg KEY=VALUE: append to runenv, or exit 64 if it is not one.
+# envarg KEY=VALUE: append to runenv, or exit 64 unless KEY is a valid name.
 envarg() {
-  case "$1" in [A-Za-z_]*=*) runenv+=("$1") ;; *) usage ;; esac
+  local key=${1%%=*}
+  case "$1" in *=*) ;; *) usage ;; esac
+  case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) usage ;; esac
+  runenv+=("$1")
 }
 
 # resolve CMD: an absolute path for a path, as given for a name on PATH.
@@ -89,7 +98,8 @@ resolve() {
   case "$1" in
     */*) if [ -f "$1" ] && [ -x "$1" ]; then echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
          else jq -n --arg e "not an executable file: $1" '{error: $e}'; exit 2; fi ;;
-    *) if command -v "$1" > /dev/null; then echo "$1"
+    # Absolute, so --env PATH=… changes the tool's PATH, not which tool runs.
+    *) if p=$(command -v "$1") && [ -x "$p" ]; then echo "$p"
        else jq -n --arg e "command not found: $1" '{error: $e}'; exit 2; fi ;;
   esac
 }

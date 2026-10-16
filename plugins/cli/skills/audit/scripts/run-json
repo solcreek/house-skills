@@ -79,10 +79,10 @@ else
 fi
 if [ "$exit" = 0 ]; then
   record json-error skip "exit 0"
-elif jq -se 'length == 1 and (.[0] | type == "object") and (.[0].error | type == "string")' "$tmp/json.out" > /dev/null 2>&1; then
+elif jq -se 'length == 1 and (.[0] | type == "object") and (.[0].error | type == "string" and length > 0)' "$tmp/json.out" > /dev/null 2>&1; then
   record json-error pass "exit $exit with an error string"
 else
-  record json-error fail "exit $exit without {\"error\": \"...\"} on stdout"
+  record json-error fail "exit $exit without a non-empty {\"error\": \"...\"} on stdout"
 fi
 if [ -n "$expect" ]; then
   if [ "$exit" = "$expect" ]; then record exit pass "exit $exit"

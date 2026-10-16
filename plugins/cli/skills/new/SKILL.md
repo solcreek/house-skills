@@ -89,7 +89,9 @@ commands, then delete them. Keep:
   mapping in Go. The libraries do none of these for you;
 - the mutating pattern: `mutates: true` (TypeScript), flattening `Change`
   (Rust), or `mutating(cmd)` plus `change(cmd)` (Go);
-- the path check (`inside`) for any path the tool writes;
+- the path check (`inside`) for any path the tool writes, and creating
+  with create-only-if-absent; to overwrite an existing file, write a temp
+  file beside it and rename over it, never open the path for writing;
 - `describe`, generated from the same definitions as help, in the shape of
   [references/describe.md](references/describe.md) shared by all three
   templates;

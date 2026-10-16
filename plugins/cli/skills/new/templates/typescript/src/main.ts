@@ -1,5 +1,5 @@
-import { existsSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs, styleText } from "node:util";
 
 // Conventions: ../audit/references/conventions.md in the cli plugin.
@@ -55,21 +55,35 @@ function print(values: Values, json: unknown, text: string) {
   console.log(values.json ? JSON.stringify(json) : text);
 }
 
-// Control characters in an argument are a usage error (rubric A9).
+// An empty argument or a control character in one is a usage error (rubric A9).
 function plain(what: string, s: string): string {
+  if (s === "") throw new UsageError(`${what} is empty`);
   if (/[\u0000-\u001f\u007f]/.test(s)) throw new UsageError(`${what} contains a control character`);
   return s;
 }
 
-// An output path must land inside root once symlinks are resolved (rubric A9).
+// The file an output path names, refused unless it is plainly inside root
+// (rubric A9). Every template's inside() refuses the same things: a `..`
+// part, a trailing slash, the root itself, a parent that resolves outside
+// root, and a last part that is a symlink (dangling or not), so the write
+// can never follow one.
 function inside(root: string, path: string): string {
+  const refuse = (why: string) => new Failure(`${path}: ${why}`);
+  if (path.split(/[\\/]/).includes("..")) throw refuse("'..' is not allowed in an output path");
+  if (/[\\/]$/.test(path)) throw refuse("names a directory, not a file");
   const realRoot = realpathSync(root);
-  const parent = resolve(root, dirname(path));
-  if (!existsSync(parent)) throw new Failure(`no such directory: ${parent}`);
+  const parent = dirname(isAbsolute(path) ? path : join(root, path));
+  if (!existsSync(parent)) throw refuse(`no such directory: ${parent}`);
   const target = join(realpathSync(parent), basename(path));
   const rel = relative(realRoot, target);
-  if (rel === "" || rel.startsWith(`..${sep}`) || rel === "..")
-    throw new Failure(`${path} is outside ${realRoot}; ${NAME} writes only under the current directory`);
+  if (rel === "" || rel === ".") throw refuse(`is ${realRoot} itself`);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+    throw refuse(`outside ${realRoot}; ${NAME} writes only under the current directory`);
+  let link = false;
+  try {
+    link = lstatSync(target).isSymbolicLink();
+  } catch {} // absent: fine
+  if (link) throw refuse("is a symlink; refusing to write through it");
   return target;
 }
 
@@ -99,7 +113,14 @@ const commands: Command[] = [
       const dryRun = Boolean(values["dry-run"]);
       // Already there is success with nothing changed (rubric S5).
       const changed = !existsSync(target);
-      if (changed && !dryRun) writeFileSync(target, "", { flag: "wx" });
+      if (changed && !dryRun) {
+        try {
+          writeFileSync(target, "", { flag: "wx" });
+        } catch (e) {
+          // Expected (permissions, a race): a failure naming the file, not a bug.
+          throw new Failure(`cannot create ${target}: ${(e as { code?: string }).code ?? e}`);
+        }
+      }
       const verb = !changed ? "exists" : dryRun ? "would create" : "created";
       print(values, { path: target, changed, dryRun }, `${verb} ${target}`);
       return EXIT.ok;
@@ -185,6 +206,7 @@ function describe() {
     summary: SUMMARY,
     exitCodes: EXIT,
     flags: flagList({
+      json: COMMON.json,
       help: COMMON.help,
       version: { type: "boolean", description: "print the version" },
     }),
@@ -200,13 +222,24 @@ function describe() {
   };
 }
 
-async function main(argv: string[]): Promise<number> {
+async function main(args: string[]): Promise<number> {
+  let argv = args;
+  // --json is global, as in the Rust and Go templates: `tool --json greet`.
+  if (argv[0] === "--json" && argv.length > 1) argv = [argv[1], "--json", ...argv.slice(2)];
   const [first, ...rest] = argv;
   if (first === undefined || first === "-h" || first === "--help" || first === "help") {
-    if (rest.length > 0) throw new UsageError(`${first} takes no arguments`);
-    console.log(help());
-    return EXIT.ok;
+    // `help COMMAND` is that command's help, as clap and cobra do.
+    if (first === "help" && rest.length === 1) argv = [rest[0], "--help"];
+    else {
+      if (rest.length > 0) throw new UsageError(`${first} takes at most one command`);
+      console.log(help());
+      return EXIT.ok;
+    }
   }
+  return dispatch(argv);
+}
+
+async function dispatch([first, ...rest]: string[]): Promise<number> {
   if (first === "--version") {
     if (rest.length > 0) throw new UsageError("--version takes no arguments");
     console.log(`${NAME} ${VERSION}`);

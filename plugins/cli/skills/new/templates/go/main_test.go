@@ -57,7 +57,7 @@ func decode(t *testing.T, s string) map[string]any {
 
 func TestHelpGoesToStdout(t *testing.T) {
 	dir := t.TempDir()
-	for _, args := range [][]string{{"--help"}, {"-h"}, {"greet", "--help"}, {"touch", "-h"}, {"touch", "x", "--help"}} {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help", "touch"}, {"greet", "--help"}, {"touch", "-h"}, {"touch", "x", "--help"}} {
 		out, errOut, code := run(t, dir, args...)
 		if code != 0 || !strings.Contains(out, "Usage") || errOut != "" {
 			t.Errorf("%v: exit %d, stdout %q, stderr %q", args, code, out, errOut)
@@ -70,7 +70,10 @@ func TestHelpGoesToStdout(t *testing.T) {
 
 func TestUsageErrorsExit2(t *testing.T) {
 	dir := t.TempDir()
-	cases := [][]string{{"--zz"}, {"nope"}, {"greet"}, {"greet", "Ada", "Bob"}, {"greet", "Ada", "--zz"}, {"describe", "zz"}, {"greet", "A\x07da"}}
+	cases := [][]string{
+		{"--zz"}, {"nope"}, {"greet"}, {"greet", "Ada", "Bob"}, {"greet", "Ada", "--zz"},
+		{"describe", "zz"}, {"greet", "A\x07da"}, {"touch", "", "--yes"}, {"-v"},
+	}
 	for _, args := range cases {
 		out, errOut, code := run(t, dir, args...)
 		if code != exitUsage || out != "" || !strings.Contains(errOut, "--help") {
@@ -118,16 +121,58 @@ func TestDryRunYesRerun(t *testing.T) {
 	}
 }
 
-func TestOutputPathCannotEscape(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Symlink(os.TempDir(), filepath.Join(dir, "out")); err != nil {
+func TestOutputPathCannotEscapeOrFollowASymlink(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "keep"), []byte("precious"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"../x", "/tmp/x", "out/x"} {
-		out, _, code := run(t, dir, "touch", path, "--yes", "--json")
-		if e, _ := decode(t, out)["error"].(string); code != exitFailed || !strings.Contains(e, "outside") {
-			t.Errorf("%s: exit %d, %q", path, code, out)
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
 		}
+	}
+	must(os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+	must(os.Symlink(outside, filepath.Join(dir, "out")))
+	must(os.Symlink(filepath.Join(outside, "keep"), filepath.Join(dir, "link")))
+	must(os.Symlink(filepath.Join(outside, "gone"), filepath.Join(dir, "dangling")))
+	must(os.Symlink(outside, filepath.Join(dir, "sub", "up")))
+	paths := []string{"../x", "/tmp/x", "out/x", "link", "dangling", "sub/up/../x", "sub/", dir + "/sub/", ".", dir, "newdir/"}
+	for _, path := range paths {
+		for _, mode := range []string{"--dry-run", "--yes"} {
+			out, _, code := run(t, dir, "touch", path, mode, "--json")
+			if code != exitFailed || decode(t, out)["usage"] != false {
+				t.Errorf("%s %s: exit %d, %q", path, mode, code, out)
+			}
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(outside, "keep")); string(b) != "precious" {
+		t.Error("overwrote a file outside")
+	}
+	for _, p := range []string{filepath.Join(outside, "gone"), filepath.Join(outside, "x"), filepath.Join(dir, "sub", "sub"), filepath.Join(dir, "newdir")} {
+		if exists(p) {
+			t.Errorf("created %s", p)
+		}
+	}
+}
+
+func TestAbsolutePathInsideIsFine(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	if _, errOut, code := run(t, dir, "touch", filepath.Join(dir, "x"), "--yes"); code != 0 {
+		t.Errorf("exit %d: %s", code, errOut)
+	}
+}
+
+func TestAFailedWriteNamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	ro := filepath.Join(dir, "ro")
+	if err := os.Mkdir(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(ro, 0o700)
+	out, _, code := run(t, dir, "touch", "ro/x", "--yes", "--json")
+	if e, _ := decode(t, out)["error"].(string); code != exitFailed || !strings.Contains(e, "cannot create") {
+		t.Errorf("exit %d, %q", code, out)
 	}
 }
 
@@ -153,8 +198,13 @@ func TestDescribeListsEveryCommand(t *testing.T) {
 		slices.Sort(n)
 		return n
 	}
-	if d.ExitCodes["usage"] != exitUsage || !slices.Contains(names(d.Flags), "version") {
+	if d.ExitCodes["usage"] != exitUsage || !slices.Equal(names(d.Flags), []string{"help", "json", "version"}) {
 		t.Errorf("root: exit codes %v, flags %v", d.ExitCodes, names(d.Flags))
+	}
+	var keys map[string]any
+	_ = json.Unmarshal([]byte(out), &keys)
+	if _, ok := keys["usage"]; ok {
+		t.Error("the top level has a usage line")
 	}
 	want := map[string][]string{"greet": {"help", "json"}, "touch": {"dry-run", "help", "json", "yes"}}
 	for _, c := range d.Commands {
