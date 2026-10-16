@@ -76,12 +76,17 @@ for stack in typescript rust go; do
     # alone takes 200 ms. Retry, up to three runs, only while it is the sole
     # failure.
     tries=0
-    # shellcheck disable=SC2086
-    until "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1; do
+    while :; do
+      got=0
+      # shellcheck disable=SC2086
+      "$probe" "$@" -- "$bin" $lvl > "$tmp/p" 2>&1 || got=$?
       tries=$((tries + 1))
-      [ "$tries" -lt 3 ] && jq -e '[.checks[] | select(.status == "fail") | .id] == ["startup"]' "$tmp/p" > /dev/null 2>&1 || break
+      [ "$got" = 1 ] && [ "$tries" -lt 3 ] &&
+        jq -e '[.checks[] | select(.status == "fail") | .id] == ["startup"]' "$tmp/p" > /dev/null 2>&1 || break
     done
-    if jq -e '.summary.fail == null' "$tmp/p" > /dev/null 2>&1; then ok
+    # Only the probe's own exit 0 is a pass: exit 2 (could not probe) has no
+    # summary at all.
+    if [ "$got" = 0 ]; then ok
     else no "$stack probe '$level': $(jq -c '[.checks[]? | select(.status == "fail") | [.id, .detail]]' "$tmp/p" 2>/dev/null || cat "$tmp/p")"; fi
   done
   # A list against a fixture with content: in the empty default directory it
@@ -93,13 +98,13 @@ for stack in typescript rust go; do
   if "$runjson" --expect-exit 1 -- "$bin" files nowhere --json > "$tmp/p" 2>&1; then ok; else no "$stack files nowhere: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # A mutating command under --dry-run is read-only; its failures are JSON too.
   rm -rf "$tmp/dry" && mkdir "$tmp/dry"
-  if "$runjson" --cwd "$tmp/dry" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1 && [ -z "$(ls -A "$tmp/dry")" ]; then ok
+  if "$runjson" --expect-exit 0 --cwd "$tmp/dry" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1 && [ -z "$(ls -A "$tmp/dry")" ]; then ok
   else no "$stack touch --dry-run: $(cat "$tmp/p"; ls -A "$tmp/dry")"; fi
   if "$runjson" --expect-exit 2 -- "$bin" touch x --json > "$tmp/p" 2>&1; then ok; else no "$stack touch without --yes: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   if "$runjson" --expect-exit 1 -- "$bin" touch ../x --yes --json > "$tmp/p" 2>&1; then ok; else no "$stack touch ../x: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # describe: one document, in the shared shape (references/describe.md).
   # run-json keeps only 2000 bytes of stdout, so read the whole document directly.
-  if "$runjson" -- "$bin" describe > "$tmp/p" 2>&1 && "$bin" describe > "$tmp/d" &&
+  if "$runjson" --expect-exit 0 -- "$bin" describe > "$tmp/p" 2>&1 && "$bin" describe > "$tmp/d" &&
      jq -e '
        (.name == "my-cli") and (.version | type == "string") and (.summary | type == "string")
        and .exitCodes == {ok: 0, failed: 1, usage: 2, partial: 3}
