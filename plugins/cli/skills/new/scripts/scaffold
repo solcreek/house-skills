@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Create a new CLI from a template that already passes cli:audit's probe.
+#
+#   scaffold STACK DIR NAME
+#
+# STACK is typescript, rust or go. DIR must not exist, or be empty. NAME is
+# the command's name (lowercase, digits, hyphens). Copies the template,
+# renames the placeholder command `tool` to NAME, and adds dependencies at
+# their latest versions (rust: cargo add; go: go get). Prints JSON with the
+# files, the build and test commands (run them in `dir`), and the absolute
+# path of the binary to probe once built.
+#
+# Exit: 0 created, 1 a step failed (`error`, and `log` with the tail of its
+# output; a DIR this run created is removed), 2 cannot start (toolchain
+# missing, DIR not empty, NAME reserved), 64 bad usage.
+set -euo pipefail
+
+usage() { echo "usage: scaffold typescript|rust|go DIR NAME" >&2; exit 64; }
+[ $# -eq 3 ] || usage
+stack=$1 dir=$2 name=$3
+case "$stack" in typescript|rust|go) ;; *) usage ;; esac
+echo "$name" | grep -Eq '^[a-z][a-z0-9-]*$' || { echo "scaffold: NAME must match [a-z][a-z0-9-]*" >&2; exit 64; }
+
+templates="$(cd "$(dirname "$0")/../templates" && pwd)"
+created=
+log=
+cleanup() { [ -n "$log" ] && rm -f "$log"; [ -n "$created" ] && rm -rf "$created"; return 0; }
+trap cleanup EXIT
+cant() { jq -n --arg e "$1" '{error: $e}'; exit 2; }
+failed() { jq -n --arg e "$1" --arg log "$(tail -c 4000 "$log" 2> /dev/null)" '{error: $e, log: $log}'; exit 1; }
+# Any other failing command still answers in JSON.
+trap 'failed "unexpected failure at line $LINENO"' ERR
+command -v jq >/dev/null || { echo '{"error":"jq not found"}'; exit 2; }
+command -v perl >/dev/null || cant "perl not found"
+
+case "$stack" in
+  typescript) need=node ;;
+  rust) need=cargo ;;
+  go) need=go ;;
+esac
+command -v "$need" >/dev/null || cant "$need not found; install it, or pick another stack"
+if [ "$stack" = typescript ]; then
+  # Type stripping without a flag: 22.18 and later in 22, 23.6 and later.
+  node -e 'const [a, b] = process.versions.node.split(".").map(Number);
+    process.exit(a > 23 || (a === 23 && b >= 6) || (a === 22 && b >= 18) ? 0 : 1)' ||
+    cant "node $(node --version) cannot run .ts directly; the template needs 22.18+ (or 23.6+)"
+fi
+if [ "$stack" = rust ]; then
+  # Names cargo refuses for a package.
+  case "$name" in
+    test|std|core|alloc|proc-macro|self|super|crate|as|async|await|break|const|continue|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|static|struct|trait|true|type|unsafe|use|where|while)
+      cant "cargo reserves the name $name; pick another" ;;
+  esac
+fi
+if [ -e "$dir" ] && { [ ! -d "$dir" ] || [ -n "$(ls -A "$dir")" ]; }; then cant "not an empty directory: $dir"; fi
+[ -e "$dir" ] || { mkdir -p "$dir" 2> /dev/null || cant "cannot create $dir"; created=$dir; }
+dir="$(cd "$dir" && pwd)"
+[ -z "$created" ] || created=$dir
+log=$(mktemp)
+
+cp -R "$templates/$stack/." "$dir/"
+# The placeholder is the whole word `tool`; the templates use it for nothing else.
+find "$dir" -type f -exec perl -pi -e "s/\\btool\\b/$name/g" {} +
+
+cd "$dir"
+case "$stack" in
+  typescript)
+    mv bin/tool "bin/$name"
+    bin="$dir/bin/$name"
+    build=""
+    test="npm test"
+    ;;
+  rust)
+    # cargo init keeps an existing src/main.rs and only writes Cargo.toml.
+    cargo init -q --vcs none --name "$name" . > "$log" 2>&1 || failed "cargo init"
+    {
+      cargo add -q clap --features derive &&
+      cargo add -q serde_json anyhow &&
+      cargo add -q --dev assert_cmd predicates
+    } >> "$log" 2>&1 || failed "cargo add"
+    bin="$dir/target/debug/$name"
+    build="cargo build"
+    test="cargo test"
+    ;;
+  go)
+    {
+      go mod init "$name" &&
+      go get github.com/spf13/cobra@latest &&
+      go mod tidy
+    } > "$log" 2>&1 || failed "go mod / go get"
+    bin="$dir/$name"
+    build="go build -o $name ."
+    test="go test ./..."
+    ;;
+esac
+
+trap - ERR
+created=
+jq -n --arg stack "$stack" --arg dir "$dir" --arg name "$name" --arg bin "$bin" \
+  --arg build "$build" --arg test "$test" \
+  --argjson files "$(find . -type f -not -path './target/*' -not -path './.git/*' | sed 's|^\./||' | sort | jq -R . | jq -s .)" \
+  '{stack: $stack, dir: $dir, name: $name, files: $files,
+    build: (if $build == "" then null else $build end), test: $test, binary: $bin}'

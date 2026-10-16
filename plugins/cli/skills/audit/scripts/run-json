@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Run one command and check its machine-readable output. Prints JSON.
+#
+#   run-json [--lines] [--timeout SECS] [--cwd DIR] [--offline] [--brief]
+#            -- CMD [ARGS...]
+#
+# Runs exactly CMD ARGS once. This runs an action, so the caller must know
+# it is safe (read-only and local), or have the user's yes. Checks:
+#   json-valid      stdout is one JSON document, or with --lines (for a
+#                   command documented as NDJSON) one JSON value per line
+#   no-color-piped  no escape codes on stdout or stderr
+# --offline and --brief as in probe. Same isolation as probe: stdin at EOF, an empty temporary directory unless
+# --cwd, no colour forcing, a timeout that kills the process group.
+#
+# Exit: 0 both passed, 1 one failed, 2 could not run (command not found or
+# not executable, jq/perl missing), 64 bad usage.
+set -euo pipefail
+
+usage() { echo "usage: run-json [--lines] [--timeout SECS] [--cwd DIR] [--offline] [--brief] -- CMD [ARGS...]" >&2; exit 64; }
+
+timeout=10
+lines=
+cwd=
+offline=
+brief=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout) [ $# -ge 2 ] || usage; timeout=$2; shift 2 ;;
+    --cwd) [ $# -ge 2 ] || usage; cwd=$2; shift 2 ;;
+    --lines) lines=1; shift ;;
+    --offline) offline=1; shift ;;
+    --brief) brief=1; shift ;;
+    --) shift; break ;;
+    *) usage ;;
+  esac
+done
+[ $# -ge 1 ] || usage
+case "$timeout" in ''|*[!0-9]*) usage ;; esac
+[ "$timeout" -ge 1 ] || usage
+
+command -v jq > /dev/null || { echo '{"error":"jq not found"}'; exit 2; }
+command -v perl > /dev/null || { echo '{"error":"perl not found"}'; exit 2; }
+. "$(dirname "$0")/lib.sh"
+cmd=$(resolve "$1") || { echo "$cmd"; exit 2; }
+shift
+base=("$cmd" "$@")
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+if [ -z "$cwd" ]; then cwd="$tmp/cwd"; mkdir "$cwd"; fi
+[ -d "$cwd" ] || { jq -n --arg e "not a directory: $cwd" '{error: $e}'; exit 2; }
+results="$tmp/results"
+: > "$results"
+
+run json "${base[@]}"
+r=$(runjson json "${base[@]}")
+meta json
+if [ "$timed" = 1 ]; then
+  record json-valid fail "timed out after ${timeout}s (stdin was at EOF: waiting on input, or slow; raise --timeout to tell which)" "$r"
+elif [ "$(bytes "$tmp/json.out")" -eq 0 ]; then
+  record json-valid fail "nothing on stdout (exit $exit)" "$r"
+elif [ -n "$lines" ]; then
+  bad=$(awk 'NF' "$tmp/json.out" | while IFS= read -r l; do printf "%s" "$l" | jq empty > /dev/null 2>&1 || echo x; done | wc -l | tr -d ' ')
+  n=$(awk 'NF' "$tmp/json.out" | wc -l | tr -d ' ')
+  if [ "$bad" = 0 ]; then record json-valid pass "$n lines, each one JSON value (exit $exit)" "$r"
+  else record json-valid fail "$bad of $n lines are not one JSON value each (exit $exit)" "$r"; fi
+elif docs=$(jq -s length < "$tmp/json.out" 2> /dev/null); then
+  if [ "$docs" = 1 ]; then record json-valid pass "one JSON document (exit $exit)" "$r"
+  else record json-valid fail "$docs JSON documents on stdout, expected one (exit $exit; pass --lines if it is NDJSON)" "$r"; fi
+else
+  record json-valid fail "stdout is not JSON (exit $exit)" "$r"
+fi
+if has_ansi json; then record no-color-piped fail "escape codes in output written to a pipe"
+else record no-color-piped pass "no escape codes"; fi
+
+report "${base[@]}"

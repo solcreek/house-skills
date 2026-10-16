@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# A tool that follows every convention the probe checks. It colours under a
+# terminal unless NO_COLOR is set, and whenever FORCE_COLOR is (as Node does).
+b= r=
+if [ -n "${FORCE_COLOR:-}" ] || { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then b=$(printf '\033[1m') r=$(printf '\033[0m'); fi
+case "${1:-}" in
+  -h|--help) echo "${b}usage:${r} good [--json]"; echo; echo "Example: good --json" ;;
+  --version) echo "good 1.2.3" ;;
+  --json) echo '{"ok": true}' ;;
+  --lines) echo '{"n": 1}'; echo '{"n": 2}' ;;
+  --env) printf '{"proxy": "%s", "git": "%s"}\n' "${HTTPS_PROXY:-}" "${GIT_ALLOW_PROTOCOL:-}" ;;
+  -*) echo "good: unknown flag $1 (see good --help)" >&2; exit 2 ;;
+  '') echo "did the thing" ;;
+  *) echo "good: unknown command $1 (see good --help)" >&2; exit 2 ;;
+esac

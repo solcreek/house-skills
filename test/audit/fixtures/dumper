@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Answers a bad flag with its whole help on stderr, never naming the flag.
+help() { echo "usage: dumper"; for i in $(seq 1 20); do echo "  option $i  does something"; done; }
+case "${1:-}" in
+  -h|--help) help ;;
+  --version) echo "dumper 2.0.0" ;;
+  *) help >&2; exit 64 ;;
+esac

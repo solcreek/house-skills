@@ -1,0 +1,7 @@
+{
+  "name": "cli",
+  "description": "Command-line tools: audit one against a rubric for people and agents, or build a new one that passes it",
+  "author": {
+    "name": "Creek"
+  }
+}

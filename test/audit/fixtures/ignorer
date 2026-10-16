@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Ignores every argument and fails because it is not in a git checkout, as
+# a tool that never parses its flags does in the probe's empty directory.
+echo "fatal: not a git repository" >&2
+exit 1
