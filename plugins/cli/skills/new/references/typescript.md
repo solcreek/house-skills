@@ -1,6 +1,6 @@
 # TypeScript
 
-Template: `templates/typescript/` — `bin/NAME` (a bash shim), `src/main.ts`,
+Template: `templates/typescript/` — `bin/NAME` (the entry point), `src/main.ts`,
 `src/main.test.ts` (`node:test`), `package.json`. No dependencies.
 
 ## Why it is shaped this way
@@ -28,24 +28,30 @@ Template: `templates/typescript/` — `bin/NAME` (a bash shim), `src/main.ts`,
   `namespace`, no parameter properties. Use `as const` objects, as `EXIT`
   does. `import type { … } from "./x.ts"` is erasable, which is how a
   lazily imported module shares its types.
-- **Tests** spawn the tool once per case and run concurrently. `run()`
-  gives each case a fresh directory, stdin at EOF, a timeout and `TOOL_HOME`;
-  pass `cwd` to reuse a directory across steps.
+- **Tests** spawn the CLI once per case with an asynchronous `run()` and
+  `runAll()`, so they really run concurrently (spawnSync would serialize
+  them). Each case gets a fresh directory, stdin at EOF, a timeout and
+  `TOOL_HOME`; pass `cwd` or `env` to share them across steps.
+- **Integer flags**: give an option `value: "N"`; `main` rejects anything
+  but a whole number, and `describe` says `integer`. `default` fills the
+  value when the flag is absent.
 
 ## Startup (P1)
 
-Node alone takes about 110–140 ms to start on s-imac (an Intel i9), and the
-template's `--help` takes 164 ms (both measured 2026-10-15). Keep `--help`
-under 300 ms by importing heavy
-modules inside `run` (`const { x } = await import("./x.ts")`), never at the
-top of `main.ts`.
+`bin/tool` is a small ES module, not a shell script: it turns on Node's
+compile cache (in the system temp directory) and imports `src/main.ts`.
+Skipping bash and reusing compiled code took `--help` on s-imac from about
+300 ms to 80–110 ms on Node 24, and 170 ms on Node 22.18, measured
+2026-10-15 under a load average of 40–50. Keep `--help` under 300 ms by
+importing heavy modules inside `run` (`const { x } = await import("./x.ts")`),
+never at the top of `main.ts`.
 
 ## Publishing to npm
 
 Type stripping is disabled for files under `node_modules`, so a published
 package must ship JavaScript. Add `tsc` (or `tsdown`) to emit `dist/`, point
 `bin` at a `dist/main.js` that starts with `#!/usr/bin/env node`, and add
-`"files": ["dist"]`. Keep the shim for development only.
+`"files": ["dist"]`. Keep `bin/NAME` importing `src/main.ts` for development only.
 
 ## Growing past one file
 

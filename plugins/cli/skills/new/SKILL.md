@@ -80,18 +80,25 @@ runner. Keep the contract tests.
 
 ## 4. Replace the example
 
-The template has two example commands: `greet`, which only reports, and
-`touch`, which mutates and writes a path. Use them as the patterns for your
-commands, then delete them. Keep:
+The template has two example commands, each a pattern to copy:
+
+- `files [DIR] [--limit N]` reports: an optional positional with a default,
+  an integer flag, the capped list shape with its stderr note, a missing
+  input as failed, and unreadable parts as a partial result (exit 3).
+- `touch PATH` mutates: `--dry-run`/`--yes`, an output path checked by
+  `inside`, a rerun that changes nothing, and state written atomically under
+  `home("state")`.
+
+Model your commands on them, then delete them. Keep:
 
 - the **help check before `run`**, the positional-count check and the
   `--dry-run`/`--yes` check in TypeScript's `main`, and the usage-error
   mapping in Go. The libraries do none of these for you;
 - the mutating pattern: `mutates: true` (TypeScript), flattening `Change`
   (Rust), or `mutating(cmd)` plus `change(cmd)` (Go);
-- the path check (`inside`) for any path the tool writes, and creating
-  with create-only-if-absent; to overwrite an existing file, write a temp
-  file beside it and rename over it, never open the path for writing;
+- the helpers: `inside` for any path the tool writes (create with
+  create-only-if-absent), `write_atomic`/`writeAtomic` to replace a file,
+  `home` for config, cache and state, and `capped` for every list;
 - `describe`, generated from the same definitions as help, in the shape of
   [references/describe.md](references/describe.md) shared by all three
   templates;

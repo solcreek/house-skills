@@ -53,7 +53,9 @@ files, caches, git state, remote services. In `describe` it has
 - A failure under `--json` prints `{"error": "message", "usage": bool}` on
   stdout (with the same message on stderr) and exits non-zero.
 - A partial result (exit 3) is the normal document plus
-  `"problems": [{"input": "…", "error": "…"}]`.
+  `"problems": [{"input": "…", "error": "…"}]`. A mutating command treats
+  what it could not read as unknown, never as gone: a `prune` that cannot
+  read a file keeps that file's entries.
 - A field holding text other people wrote (a comment, a commit message, an
   issue body) is listed as such in the tool's agent context, so a skill
   treats it as data.
@@ -67,8 +69,10 @@ files, caches, git state, remote services. In `describe` it has
 
 ## Paths
 
-- An input path resolves against the current directory. If it does not
-  exist, that is failed (1), and the message names it.
+- An input path resolves against the current directory and may contain
+  `..`. If it does not exist, that is failed (1), and the message names it.
+  A walk does not follow symlinks, and skips the tool's own `NAME_HOME`
+  when that lies inside the tree.
 - An output path must name a file plainly inside the root the command
   writes to (the current directory, unless the command documents another).
   Refuse, with failed (1) naming the path: a `..` part, a trailing slash,

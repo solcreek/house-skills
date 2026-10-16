@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -21,13 +23,19 @@ var version = "0.1.0" // set by -ldflags "-X main.version=..." at release
 
 // Every exit code, in help and in `describe`. Add to it; never reuse one.
 const (
-	exitOK     = 0
-	exitFailed = 1
-	exitUsage  = 2
+	exitOK      = 0
+	exitFailed  = 1
+	exitUsage   = 2
+	exitPartial = 3
 )
+
+const exitHelp = "Exit codes: 0 ok, 1 failed, 2 usage, 3 partial"
 
 // usageError marks a mistake in the invocation: exit 2, a short message.
 type usageError struct{ error }
+
+// partialError carries a result that is already printed: exit 3.
+type partialError struct{ error }
 
 var asJSON bool
 
@@ -35,7 +43,6 @@ func newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "tool",
 		Short:   "One line on what it is for",
-		Long:    "One line on what it is for.\n\nExit codes: 0 ok, 1 failed, 2 usage.\nRun 'tool describe' for every command as JSON.",
 		Version: version,
 		// cobra prints the whole usage on every error, and exits 1 for a bad
 		// flag; main prints a short message and exits 2 instead (rubric D3, E3).
@@ -60,21 +67,89 @@ func newRoot() *cobra.Command {
 	root.Flags().Bool("version", false, "print the version")
 	root.PersistentFlags().BoolVar(&asJSON, "json", false, "print one JSON document on stdout")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
+	// Exit codes on every help page (rubric E4); children inherit it.
+	root.SetHelpTemplate(root.HelpTemplate() + "\n" + exitHelp + "\nRun 'tool describe' for every command as JSON.\n")
 
-	root.AddCommand(&cobra.Command{
-		Use:     "greet NAME",
-		Short:   "Print a greeting",
-		Example: "  tool greet Ada\n  tool greet Ada --json",
-		Args:    usageArgs(cobra.ExactArgs(1)),
+	files := &cobra.Command{
+		Use:     "files [DIR]",
+		Short:   "List the files under a directory, largest first",
+		Example: "  tool files\n  tool files src --limit 5 --json",
+		// The default of an optional positional, for help and describe.
+		Annotations: map[string]string{"default.DIR": "."},
+		Args:        usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := plain("NAME", args[0])
+			dir := "."
+			if len(args) == 1 {
+				dir = args[0]
+			}
+			if _, err := plain("DIR", dir); err != nil {
+				return err
+			}
+			root, err := filepath.Abs(dir)
 			if err != nil {
 				return err
 			}
-			greeting := "hello, " + name
-			return output(cmd, map[string]any{"greeting": greeting}, greeting)
+			if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+				return fmt.Errorf("no such directory: %s", root)
+			}
+			limit, _ := cmd.Flags().GetUint("limit")
+			type file struct {
+				Path  string `json:"path"`
+				Bytes int64  `json:"bytes"`
+			}
+			var found []file
+			problems := []map[string]string{}
+			// WalkDir does not follow symlinks. What cannot be read is a
+			// problem, never silently "nothing there" (rubric A7).
+			_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+				rel, _ := filepath.Rel(root, p)
+				if err != nil {
+					problems = append(problems, map[string]string{"input": rel, "error": cause(err)})
+					return nil
+				}
+				if d.Type().IsRegular() {
+					if info, err := d.Info(); err == nil {
+						found = append(found, file{rel, info.Size()})
+					} else {
+						problems = append(problems, map[string]string{"input": rel, "error": err.Error()})
+					}
+				}
+				return nil
+			})
+			sort.Slice(found, func(i, j int) bool {
+				if found[i].Bytes != found[j].Bytes {
+					return found[i].Bytes > found[j].Bytes
+				}
+				return found[i].Path < found[j].Path
+			})
+			items, list := capped(found, int(limit))
+			if asJSON {
+				doc := map[string]any{"root": root, "items": items}
+				for k, v := range list {
+					doc[k] = v
+				}
+				if len(problems) > 0 {
+					doc["problems"] = problems
+				}
+				if err := printJSON(doc); err != nil {
+					return err
+				}
+			} else {
+				for _, f := range items {
+					fmt.Fprintf(cmd.OutOrStdout(), "%d\t%s\n", f.Bytes, printable(f.Path))
+				}
+			}
+			for _, p := range problems {
+				fmt.Fprintf(os.Stderr, "tool: cannot read %s: %s\n", printable(p["input"]), p["error"])
+			}
+			if len(problems) > 0 {
+				return partialError{fmt.Errorf("%d inputs could not be read", len(problems))}
+			}
+			return nil
 		},
-	})
+	}
+	files.Flags().Uint("limit", 20, "show at most N items; 0 for all")
+	root.AddCommand(files)
 
 	touch := &cobra.Command{
 		Use:     "touch PATH",
@@ -100,14 +175,24 @@ func newRoot() *cobra.Command {
 				return err
 			}
 			// Already there is success with nothing changed (rubric S5).
-			_, statErr := os.Stat(target)
+			_, statErr := os.Lstat(target)
 			changed := errors.Is(statErr, os.ErrNotExist)
 			if changed && !dryRun {
 				f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 				if err != nil {
-					return fmt.Errorf("cannot create %s: %w", target, errors.Unwrap(err))
+					return fmt.Errorf("cannot create %s: %s", target, cause(err))
 				}
 				f.Close()
+				// State (conventions): what this tool created, kept across runs.
+				state := home("state")
+				var history []string
+				if b, err := os.ReadFile(filepath.Join(state, "history.json")); err == nil {
+					_ = json.Unmarshal(b, &history) // unreadable: start over
+				}
+				b, _ := json.Marshal(append(history, target))
+				if err := writeAtomic(state, "history.json", b); err != nil {
+					return err
+				}
 			}
 			verb := map[bool]string{true: "created", false: "exists"}[changed]
 			if changed && dryRun {
@@ -120,12 +205,27 @@ func newRoot() *cobra.Command {
 	root.AddCommand(touch)
 
 	root.AddCommand(&cobra.Command{
-		Use:   "describe",
-		Short: "Print every command, flag and exit code as JSON",
-		Args:  usageArgs(cobra.NoArgs),
-		RunE:  func(*cobra.Command, []string) error { return printJSON(describe(root)) },
+		Use:     "describe",
+		Short:   "Print every command, flag and exit code as JSON",
+		Example: "  tool describe",
+		Args:    usageArgs(cobra.NoArgs),
+		RunE:    func(*cobra.Command, []string) error { return printJSON(describe(root)) },
 	})
 	return root
+}
+
+// capped cuts a list to limit (0: all) and says so on stderr, so a pipe sees
+// only results (conventions: JSON output, Human output).
+func capped[T any](all []T, limit int) ([]T, map[string]any) {
+	items := all
+	if limit > 0 && limit < len(all) {
+		items = all[:limit]
+		fmt.Fprintf(os.Stderr, "%d of %d shown; --limit 0 for all\n", len(items), len(all))
+	}
+	if items == nil {
+		items = []T{}
+	}
+	return items, map[string]any{"total": len(all), "shown": len(items), "truncated": len(items) < len(all)}
 }
 
 // mutating gives a command --dry-run and --yes and marks it, so the root's
@@ -162,6 +262,16 @@ func plain(what, s string) (string, error) {
 	return s, nil
 }
 
+// printable makes text from files or the network safe for a terminal.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\t' {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
 // inside is the file an output path names, refused unless it is plainly
 // inside root (rubric A9). Every template's inside() refuses the same
 // things: a `..` part, a trailing slash, the root itself, a parent that
@@ -195,12 +305,72 @@ func inside(root, path string) (string, error) {
 	case err == nil && rel == ".":
 		return "", refuse("is %s itself", realRoot)
 	case err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)):
-		return "", refuse("outside %s; tool writes only under the current directory", realRoot)
+		return "", refuse("outside %s", realRoot)
 	}
 	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return "", refuse("is a symlink; refusing to write through it")
 	}
 	return target, nil
+}
+
+// home is where config, cache or state live (conventions: State).
+// TOOL_HOME moves all three under one directory; tests set it.
+func home(kind string) string {
+	if dir := os.Getenv("TOOL_HOME"); dir != "" {
+		abs, _ := filepath.Abs(dir)
+		return filepath.Join(abs, kind)
+	}
+	vars := map[string][2]string{
+		"config": {"XDG_CONFIG_HOME", ".config"},
+		"cache":  {"XDG_CACHE_HOME", ".cache"},
+		"state":  {"XDG_STATE_HOME", filepath.Join(".local", "state")},
+	}[kind]
+	base := os.Getenv(vars[0])
+	if !filepath.IsAbs(base) { // XDG says to ignore a relative path
+		h, _ := os.UserHomeDir()
+		base = filepath.Join(h, vars[1])
+	}
+	return filepath.Join(base, "tool")
+}
+
+// writeAtomic replaces root/name with data: a temp file beside it, then a
+// rename over it, so a crash never leaves half a file and nothing is written
+// through a symlink.
+func writeAtomic(root, name string, data []byte) error {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("cannot create %s: %s", root, cause(err))
+	}
+	target, err := inside(root, name)
+	if err != nil {
+		return err
+	}
+	temp, err := inside(root, fmt.Sprintf(".%s.%d.tmp", name, os.Getpid()))
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err == nil {
+		_, err = f.Write(data)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err == nil {
+		err = os.Rename(temp, target)
+	}
+	if err != nil {
+		os.Remove(temp)
+		return fmt.Errorf("cannot write %s: %w", target, err)
+	}
+	return nil
+}
+
+// cause is an OS error without the path it repeats ("permission denied").
+func cause(err error) string {
+	if u := errors.Unwrap(err); u != nil {
+		return u.Error()
+	}
+	return err.Error()
 }
 
 // usageArgs makes an argument-count error a usage error.
@@ -233,9 +403,6 @@ func describe(c *cobra.Command) map[string]any {
 	// cobra adds --help and --version only when a command runs; add them now
 	// so describe lists what --help shows.
 	c.InitDefaultHelpFlag()
-	if !c.HasParent() {
-		c.InitDefaultVersionFlag()
-	}
 	flags := []map[string]any{}
 	add := func(f *pflag.Flag) {
 		if f.Hidden {
@@ -245,12 +412,18 @@ func describe(c *cobra.Command) map[string]any {
 		if f.Shorthand != "" {
 			short = f.Shorthand
 		}
-		takesValue := f.Value.Type() != "bool"
-		if takesValue && f.DefValue != "" {
+		kind := "string"
+		switch f.Value.Type() {
+		case "bool":
+			kind = "boolean"
+		case "int", "uint", "int64", "uint64":
+			kind = "integer"
+		}
+		if kind != "boolean" && f.DefValue != "" {
 			def = f.DefValue
 		}
 		flags = append(flags, map[string]any{
-			"name": f.Name, "short": short, "takesValue": takesValue, "default": def, "description": f.Usage,
+			"name": f.Name, "short": short, "type": kind, "default": def, "description": f.Usage,
 		})
 	}
 	c.LocalFlags().VisitAll(add)
@@ -262,13 +435,31 @@ func describe(c *cobra.Command) map[string]any {
 		}
 	}
 	d := map[string]any{"name": c.Name(), "summary": c.Short, "flags": flags, "commands": subs}
-	if c.HasParent() {
-		d["usage"] = c.UseLine()
-		d["mutates"] = c.Annotations["mutates"] == "true"
-	} else {
+	if !c.HasParent() {
 		d["version"] = version
-		d["exitCodes"] = map[string]int{"ok": exitOK, "failed": exitFailed, "usage": exitUsage}
+		d["exitCodes"] = map[string]int{"ok": exitOK, "failed": exitFailed, "usage": exitUsage, "partial": exitPartial}
+		return d
 	}
+	// Positionals from Use ("files [DIR]"): [X] is optional.
+	args := []map[string]any{}
+	for _, w := range strings.Fields(c.Use)[1:] {
+		name := strings.Trim(w, "[]")
+		var def any
+		if v, ok := c.Annotations["default."+name]; ok {
+			def = v
+		}
+		args = append(args, map[string]any{"name": name, "required": !strings.HasPrefix(w, "["), "default": def})
+	}
+	examples := []string{}
+	for _, line := range strings.Split(c.Example, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			examples = append(examples, line)
+		}
+	}
+	d["usage"] = c.UseLine()
+	d["mutates"] = c.Annotations["mutates"] == "true"
+	d["args"] = args
+	d["examples"] = examples
 	return d
 }
 
@@ -280,9 +471,12 @@ func main() {
 	if err == nil {
 		os.Exit(exitOK)
 	}
+	// A partial result is already printed, problems included.
+	if errors.As(err, new(partialError)) {
+		os.Exit(exitPartial)
+	}
 	fmt.Fprintf(os.Stderr, "tool: %v\n", err)
-	var ue usageError
-	usage := errors.As(err, &ue)
+	usage := errors.As(err, new(usageError))
 	if usage {
 		fmt.Fprintln(os.Stderr, "Run 'tool --help' for usage.")
 	}
