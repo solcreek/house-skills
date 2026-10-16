@@ -2,7 +2,18 @@
 // the CLI; run() is asynchronous, so the cases really do run concurrently.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn as spawnAsync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -261,11 +272,56 @@ describe("contract", { concurrency: true }, () => {
     assert.doesNotMatch(r.err, /\n\s+at /); // no stack trace
   });
 
+  test("forget rewrites state under its lock, keeps what it cannot parse, and keeps the mode", async () => {
+    const cwd = sandbox();
+    const home = sandbox();
+    const env = { TOOL_HOME: home };
+    for (const n of ["a", "b"]) await run(["touch", n, "--yes"], { cwd, env });
+    const file = join(home, "state", "history.jsonl");
+    writeFileSync(file, `${readFileSync(file, "utf8")}not json\n`);
+    chmodSync(file, 0o640);
+    const before = readFileSync(file, "utf8");
+    const dry = json(await run(["forget", "a", "--dry-run", "--json"], { cwd, env }));
+    assert.deepEqual([dry.removed, dry.changed, dry.dryRun], [1, true, true]);
+    assert.equal(readFileSync(file, "utf8"), before);
+    const yes = json(await run(["forget", "a", "--yes", "--json"], { cwd, env }));
+    assert.deepEqual([yes.removed, yes.changed], [1, true]);
+    const lines = readFileSync(file, "utf8").trim().split("\n");
+    assert.deepEqual(lines.map((l) => l.includes(`${cwd}/b`) || l === "not json"), [true, true]);
+    assert.equal(statSync(file).mode & 0o777, 0o640);
+    assert.equal(existsSync(`${file}.lock`), false);
+    const again = json(await run(["forget", "a", "--yes", "--json"], { cwd, env }));
+    assert.deepEqual([again.removed, again.changed], [0, false]);
+  });
+
+  test("a held lock is busy (exit 4) and changes nothing; a stale one is taken", async () => {
+    const cwd = sandbox();
+    const home = sandbox();
+    const env = { TOOL_HOME: home };
+    await run(["touch", "a", "--yes"], { cwd, env });
+    const file = join(home, "state", "history.jsonl");
+    const before = readFileSync(file, "utf8");
+    // A live owner: a process that outlives the attempt.
+    const owner = spawnAsync("sleep", ["30"]);
+    writeFileSync(`${file}.lock`, String(owner.pid));
+    const busy = await run(["forget", "a", "--yes", "--json"], { cwd, env });
+    owner.kill();
+    assert.equal(busy.code, 4, busy.err);
+    assert.match(json(busy).error, /locked by pid/);
+    assert.equal(readFileSync(file, "utf8"), before);
+    // A dead owner: stale, removed, and the run goes ahead.
+    writeFileSync(`${file}.lock`, "999999");
+    const taken = await run(["forget", "a", "--yes", "--json"], { cwd, env });
+    assert.equal(taken.code, 0, taken.err);
+    assert.equal(json(taken).removed, 1);
+    assert.equal(existsSync(`${file}.lock`), false);
+  });
+
   test("describe lists every command, its args and flags as --help shows them", async () => {
     type Flag = { name: string };
     const d = json(await run(["describe"]));
     const names = (flags: Flag[]) => flags.map((f) => f.name).sort();
-    assert.deepEqual(d.exitCodes, { ok: 0, failed: 1, usage: 2, partial: 3 });
+    assert.deepEqual(d.exitCodes, { ok: 0, failed: 1, usage: 2, partial: 3, busy: 4 });
     assert.deepEqual(names(d.flags), ["help", "json", "version"]);
     assert.deepEqual(Object.keys(d).sort(), ["commands", "exitCodes", "flags", "name", "summary", "version"]);
     const by = Object.fromEntries(d.commands.map((c: { name: string }) => [c.name, c]));
@@ -277,6 +333,7 @@ describe("contract", { concurrency: true }, () => {
     );
     assert.deepEqual(names(by.touch.flags), ["dry-run", "help", "json", "yes"]);
     assert.equal(by.touch.mutates, true);
+    assert.equal(by.forget.mutates, true);
     assert.ok(by.files.examples.length > 0);
   });
 });

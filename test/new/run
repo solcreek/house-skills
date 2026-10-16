@@ -68,7 +68,7 @@ for stack in typescript rust go; do
 
   # files and touch take a free positional, so an unknown subcommand there
   # is an argument; describe takes none, so it gets every check.
-  for level in "top" "files --skip unknown-command" "touch --skip unknown-command" "describe"; do
+  for level in "top" "files --skip unknown-command" "touch --skip unknown-command" "forget --skip unknown-command" "describe"; do
     set -- $level
     lvl=$1; shift
     [ "$lvl" = top ] && lvl=
@@ -101,13 +101,15 @@ for stack in typescript rust go; do
   if "$runjson" --expect-exit 0 --cwd "$tmp/dry" -- "$bin" touch x --dry-run --json > "$tmp/p" 2>&1 && [ -z "$(ls -A "$tmp/dry")" ]; then ok
   else no "$stack touch --dry-run: $(cat "$tmp/p"; ls -A "$tmp/dry")"; fi
   if "$runjson" --expect-exit 2 -- "$bin" touch x --json > "$tmp/p" 2>&1; then ok; else no "$stack touch without --yes: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
+  if "$runjson" --expect-exit 0 --env MY_CLI_HOME="$tmp/fhome" -- "$bin" forget x --dry-run --json > "$tmp/p" 2>&1; then ok
+  else no "$stack forget --dry-run: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   if "$runjson" --expect-exit 1 -- "$bin" touch ../x --yes --json > "$tmp/p" 2>&1; then ok; else no "$stack touch ../x: $(jq -c '[.checks[] | select(.status == "fail")]' "$tmp/p")"; fi
   # describe: one document, in the shared shape (references/describe.md).
   # run-json keeps only 2000 bytes of stdout, so read the whole document directly.
   if "$runjson" --expect-exit 0 -- "$bin" describe > "$tmp/p" 2>&1 && "$bin" describe > "$tmp/d" &&
      jq -e '
        (.name == "my-cli") and (.version | type == "string") and (.summary | type == "string")
-       and .exitCodes == {ok: 0, failed: 1, usage: 2, partial: 3}
+       and .exitCodes == {ok: 0, failed: 1, usage: 2, partial: 3, busy: 4}
        and ([.flags[].name] | sort == ["help", "json", "version"])
        and (keys == ["commands", "exitCodes", "flags", "name", "summary", "version"])
        and all(.flags[], .commands[].flags[]; keys == ["default", "description", "name", "short", "type"]

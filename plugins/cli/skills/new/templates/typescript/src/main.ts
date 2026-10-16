@@ -1,10 +1,15 @@
+import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -18,10 +23,12 @@ const VERSION = "0.1.0";
 const SUMMARY = "one line on what it is for";
 
 // Every exit code, in help and in `describe`. Add to it; never reuse one.
-const EXIT = { ok: 0, failed: 1, usage: 2, partial: 3 } as const;
+const EXIT = { ok: 0, failed: 1, usage: 2, partial: 3, busy: 4 } as const;
 
 class UsageError extends Error {}
 class Failure extends Error {}
+// Another run holds a lock this one needs: nothing changed, retry (exit 4).
+class Busy extends Error {}
 
 type Option = {
   type: "boolean" | "string";
@@ -106,8 +113,8 @@ function inside(root: string, path: string): string {
   return target;
 }
 
-// The tool's own directories that exist, by real path: a walk skips them
-// (conventions: Paths), so a TOOL_HOME inside the tree is not listed.
+// This CLI's own directories that exist, by real path: a walk skips them
+// (conventions: Paths), so TOOL_HOME inside the tree is not listed.
 function homes(): Set<string> {
   const dirs = [process.env.TOOL_HOME ? resolve(process.env.TOOL_HOME) : "", ...KINDS.map(home)];
   return new Set(dirs.filter((d) => d && existsSync(d)).map((d) => realpathSync(d)));
@@ -144,11 +151,86 @@ function appendState(name: string, entry: unknown): boolean {
   }
   try {
     mkdirSync(state, { recursive: true, mode: 0o700 });
-    appendFileSync(inside(state, name), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    // Under the lock replaceFile takes, so an append never lands in a file
+    // that is being renamed away.
+    withLock(state, name, () =>
+      appendFileSync(inside(state, name), `${JSON.stringify(entry)}\n`, { mode: 0o600 }),
+    );
     return true;
   } catch (e) {
     console.error(`${NAME}: warning: not recorded in ${join(state, name)}: ${reason(e)}`);
     return false;
+  }
+}
+
+// Paths to remove if the run is interrupted: a lock or a temp file it made.
+const ours = new Set<string>();
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const)
+  process.on(signal, () => {
+    for (const p of ours) rmSync(p, { force: true });
+    process.exit(code);
+  });
+
+const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const running = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as { code?: string }).code === "EPERM"; // alive, someone else's
+  }
+};
+
+// Run fn holding dir/name.lock (conventions: State). The lock is created
+// only if absent and holds our pid; one whose pid is gone is stale and
+// removed. After 2 s of someone else holding it: Busy, exit 4.
+function withLock<T>(dir: string, name: string, fn: () => T): T {
+  const lock = inside(dir, `${name}.lock`);
+  for (let deadline = Date.now() + 2000, stale = false; ; ) {
+    try {
+      writeFileSync(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+      break;
+    } catch (e) {
+      if ((e as { code?: string }).code !== "EEXIST") throw e;
+    }
+    const owner = Number(readFileSync(lock, "utf8"));
+    if (!stale && !(owner > 0 && running(owner))) {
+      stale = true; // once: a second stale lock means another run is racing
+      rmSync(lock, { force: true });
+      continue;
+    }
+    if (Date.now() > deadline) throw new Busy(`${join(dir, name)} is locked by pid ${owner}; retry`);
+    pause(50);
+  }
+  ours.add(lock);
+  try {
+    return fn();
+  } finally {
+    rmSync(lock, { force: true });
+    ours.delete(lock);
+  }
+}
+
+// Replace dir/name with data (conventions: State): a uniquely named temp file
+// beside it, given the target's mode (a new file 0600), renamed over it. The
+// rename never follows a symlink; inside() refused one already.
+function replaceFile(dir: string, name: string, data: string) {
+  const target = inside(dir, name);
+  const temp = inside(dir, `.${name}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  let mode = 0o600;
+  try {
+    mode = statSync(target).mode & 0o777;
+  } catch {} // new file
+  ours.add(temp);
+  try {
+    writeFileSync(temp, data, { flag: "wx", mode });
+    chmodSync(temp, mode); // the umask may have narrowed it
+    renameSync(temp, target);
+  } catch (e) {
+    rmSync(temp, { force: true });
+    throw new Failure(`cannot write ${target}: ${reason(e)}`);
+  } finally {
+    ours.delete(temp);
   }
 }
 
@@ -188,7 +270,7 @@ const commands: Command[] = [
       }
       if (!info.isDirectory()) throw new Failure(`not a directory: ${given}`);
       // Walk the real path, so a symlinked DIR (or current directory) lists
-      // its files, and paths compare with the tool's own homes below.
+      // its files, and paths compare with this CLI's own homes below.
       const root = realpathSync(given);
       const own = homes();
       // What cannot be read inside the tree is a problem, never silently
@@ -251,10 +333,50 @@ const commands: Command[] = [
           throw new Failure(`cannot create ${target}: ${reason(e)}`);
         }
       }
-      // State: what this tool created, kept across runs.
+      // State: what this CLI created, kept across runs.
       const recorded = changed && !dryRun ? appendState("history.jsonl", { path: target }) : false;
       const verb = !changed ? "exists" : dryRun ? "would create" : "created";
       emit(values, { path: target, changed, dryRun, recorded }, () => `${verb} ${target}`);
+      return EXIT.ok;
+    },
+  },
+  {
+    name: "forget",
+    summary: "remove a file from what touch has created",
+    args: [{ name: "PATH", required: true }],
+    examples: [`${NAME} forget notes.txt --dry-run`, `${NAME} forget notes.txt --yes --json`],
+    mutates: true,
+    options: {},
+    run(values, [path]) {
+      // Writing state is this command's action, so failing to is failing.
+      const state = home("state");
+      if (!state) throw new Failure("no home directory; set TOOL_HOME or XDG_STATE_HOME");
+      const target = resolve(plain("PATH", path));
+      const dryRun = Boolean(values["dry-run"]);
+      const file = join(state, "history.jsonl");
+      const change = () => {
+        let text = "";
+        try {
+          text = readFileSync(file, "utf8");
+        } catch (e) {
+          if ((e as { code?: string }).code !== "ENOENT") throw new Failure(`cannot read ${file}: ${reason(e)}`);
+        }
+        // A line that does not parse is kept: unknown, never gone.
+        const lines = text.split("\n").filter((l) => l !== "");
+        const kept = lines.filter((l) => {
+          try {
+            return (JSON.parse(l) as { path?: unknown }).path !== target;
+          } catch {
+            return true;
+          }
+        });
+        const removed = lines.length - kept.length;
+        if (removed && !dryRun) replaceFile(state, "history.jsonl", kept.map((l) => `${l}\n`).join(""));
+        return removed;
+      };
+      const removed = dryRun || !existsSync(state) ? change() : withLock(state, "history.jsonl", change);
+      const verb = !removed ? "not recorded" : dryRun ? "would forget" : "forgot";
+      emit(values, { path: target, removed, changed: removed > 0, dryRun }, () => `${verb} ${target}`);
       return EXIT.ok;
     },
   },
@@ -417,14 +539,15 @@ try {
   process.exitCode = await main(argv);
 } catch (e) {
   const usage = e instanceof UsageError;
+  const busy = e instanceof Busy;
   const message = e instanceof Error ? e.message : String(e);
   // A Failure is expected and its message is enough; anything else is a bug,
   // so keep the stack for whoever reports it.
-  if (!(usage || e instanceof Failure) && e instanceof Error && e.stack) console.error(e.stack);
+  if (!(usage || busy || e instanceof Failure) && e instanceof Error && e.stack) console.error(e.stack);
   console.error(`${NAME}: ${message}`);
   if (usage) console.error(`Run '${NAME} --help' for usage.`);
   // Under --json a failure is JSON too (rubric A5). The only place argv is
   // searched by hand: parsing may have failed before it saw --json.
   if (argv.includes("--json")) console.log(JSON.stringify({ error: message, usage }));
-  process.exitCode = usage ? EXIT.usage : EXIT.failed;
+  process.exitCode = usage ? EXIT.usage : busy ? EXIT.busy : EXIT.failed;
 }

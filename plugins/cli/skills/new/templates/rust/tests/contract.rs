@@ -146,7 +146,7 @@ fn ties_sort_by_bytes_a_symlinked_dir_lists_and_the_home_is_skipped() {
     cli_in(d.path(), home).args(["touch", "made", "--yes"]).assert().success();
     assert!(d.path().join(".home/state/history.jsonl").exists());
     std::fs::write(d.path().join(".home/extra"), "x").unwrap();
-    let v = json(&cli_in(d.path(), &home).args(["files", "--json"]).output().unwrap().stdout);
+    let v = json(&cli_in(d.path(), home).args(["files", "--json"]).output().unwrap().stdout);
     assert!(v["items"].as_array().unwrap().iter().all(|i| !i["path"].as_str().unwrap().starts_with(".home")));
 }
 
@@ -265,10 +265,59 @@ fn a_failed_write_names_the_file() {
 }
 
 #[test]
+fn forget_rewrites_state_under_its_lock_keeps_unparsed_lines_and_the_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = sandbox();
+    let home = sandbox();
+    for n in ["a", "b"] {
+        cli_in(d.path(), home.path()).args(["touch", n, "--yes"]).assert().success();
+    }
+    let file = home.path().join("state/history.jsonl");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("not json\n");
+    std::fs::write(&file, &text).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let dry = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--dry-run", "--json"]).output().unwrap().stdout);
+    assert_eq!((dry["removed"].as_u64(), dry["dryRun"].as_bool()), (Some(1), Some(true)));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    let yes = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!((yes["removed"].as_u64(), yes["changed"].as_bool()), (Some(1), Some(true)));
+    let lines: Vec<String> = std::fs::read_to_string(&file).unwrap().lines().map(String::from).collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("/b\"") && lines[1] == "not json");
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+    assert!(!home.path().join("state/history.jsonl.lock").exists());
+    let again = json(&cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap().stdout);
+    assert_eq!(again["changed"], false);
+}
+
+#[test]
+fn a_held_lock_is_busy_and_a_stale_one_is_taken() {
+    let d = sandbox();
+    let home = sandbox();
+    cli_in(d.path(), home.path()).args(["touch", "a", "--yes"]).assert().success();
+    let file = home.path().join("state/history.jsonl");
+    let before = std::fs::read_to_string(&file).unwrap();
+    let mut owner = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    std::fs::write(home.path().join("state/history.jsonl.lock"), owner.id().to_string()).unwrap();
+    let busy = cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap();
+    let _ = owner.kill();
+    let _ = owner.wait();
+    assert_eq!(busy.status.code(), Some(4));
+    assert!(json(&busy.stdout)["error"].as_str().unwrap().contains("locked by pid"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    std::fs::write(home.path().join("state/history.jsonl.lock"), "999999").unwrap();
+    let taken = cli_in(d.path(), home.path()).args(["forget", "a", "--yes", "--json"]).output().unwrap();
+    assert!(taken.status.success());
+    assert_eq!(json(&taken.stdout)["removed"], 1);
+    assert!(!home.path().join("state/history.jsonl.lock").exists());
+}
+
+#[test]
 fn describe_lists_every_command_its_args_and_flags() {
     let d = sandbox();
     let v = json(&cli(d.path()).arg("describe").output().unwrap().stdout);
-    assert_eq!(v["exitCodes"], serde_json::json!({ "ok": 0, "failed": 1, "usage": 2, "partial": 3 }));
+    assert_eq!(v["exitCodes"], serde_json::json!({ "ok": 0, "failed": 1, "usage": 2, "partial": 3, "busy": 4 }));
     let names = |c: &Value| -> Vec<String> {
         let mut n: Vec<String> = c["flags"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         n.sort();
@@ -285,5 +334,6 @@ fn describe_lists_every_command_its_args_and_flags() {
     assert_eq!((limit["type"].as_str(), limit["default"].as_str()), (Some("integer"), Some("20")));
     assert_eq!(names(&cmd("touch")), ["dry-run", "help", "json", "yes"]);
     assert_eq!(cmd("touch")["mutates"], true);
+    assert_eq!(cmd("forget")["mutates"], true);
     assert!(!cmd("files")["examples"].as_array().unwrap().is_empty());
 }

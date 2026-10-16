@@ -350,6 +350,67 @@ func TestAFailedWriteNamesTheFile(t *testing.T) {
 	}
 }
 
+func TestForgetRewritesStateUnderItsLock(t *testing.T) {
+	t.Parallel()
+	dir, home := t.TempDir(), t.TempDir()
+	for _, n := range []string{"a", "b"} {
+		runIn(t, dir, home, "touch", n, "--yes")
+	}
+	file := filepath.Join(home, "state", "history.jsonl")
+	b, _ := os.ReadFile(file)
+	text := string(b) + "not json\n"
+	must(t, os.WriteFile(file, []byte(text), 0o640))
+	must(t, os.Chmod(file, 0o640))
+	if v := decode(t, runIn(t, dir, home, "forget", "a", "--dry-run", "--json").out); v["removed"] != 1.0 || v["dryRun"] != true {
+		t.Errorf("dry run: %v", v)
+	}
+	if b, _ := os.ReadFile(file); string(b) != text {
+		t.Error("the dry run wrote")
+	}
+	if v := decode(t, runIn(t, dir, home, "forget", "a", "--yes", "--json").out); v["removed"] != 1.0 || v["changed"] != true {
+		t.Errorf("--yes: %v", v)
+	}
+	b, _ = os.ReadFile(file)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "/b\"") || lines[1] != "not json" {
+		t.Errorf("history after forget: %q", b)
+	}
+	if fi, _ := os.Stat(file); fi.Mode().Perm() != 0o640 {
+		t.Errorf("mode %v, want 0640", fi.Mode().Perm())
+	}
+	if exists(file + ".lock") {
+		t.Error("the lock was left behind")
+	}
+	if v := decode(t, runIn(t, dir, home, "forget", "a", "--yes", "--json").out); v["changed"] != false {
+		t.Errorf("rerun: %v", v)
+	}
+}
+
+func TestAHeldLockIsBusyAndAStaleOneIsTaken(t *testing.T) {
+	t.Parallel()
+	dir, home := t.TempDir(), t.TempDir()
+	runIn(t, dir, home, "touch", "a", "--yes")
+	file := filepath.Join(home, "state", "history.jsonl")
+	before, _ := os.ReadFile(file)
+	owner := exec.Command("sleep", "30")
+	must(t, owner.Start())
+	must(t, os.WriteFile(file+".lock", []byte(fmt.Sprint(owner.Process.Pid)), 0o600))
+	r := runIn(t, dir, home, "forget", "a", "--yes", "--json")
+	owner.Process.Kill()
+	owner.Wait()
+	if e, _ := decode(t, r.out)["error"].(string); r.code != exitBusy || !strings.Contains(e, "locked by pid") {
+		t.Errorf("busy: exit %d, %q", r.code, r.out)
+	}
+	if after, _ := os.ReadFile(file); string(after) != string(before) {
+		t.Error("a busy run wrote")
+	}
+	must(t, os.WriteFile(file+".lock", []byte("999999"), 0o600))
+	r = runIn(t, dir, home, "forget", "a", "--yes", "--json")
+	if r.code != 0 || decode(t, r.out)["removed"] != 1.0 || exists(file+".lock") {
+		t.Errorf("stale lock: exit %d, %q", r.code, r.out)
+	}
+}
+
 func TestDescribe(t *testing.T) {
 	t.Parallel()
 	r := run(t, t.TempDir(), "describe")
@@ -384,7 +445,7 @@ func TestDescribe(t *testing.T) {
 		slices.Sort(n)
 		return n
 	}
-	if d.ExitCodes["partial"] != exitPartial || !slices.Equal(names(d.Flags), []string{"help", "json", "version"}) {
+	if d.ExitCodes["partial"] != exitPartial || d.ExitCodes["busy"] != exitBusy || !slices.Equal(names(d.Flags), []string{"help", "json", "version"}) {
 		t.Errorf("root: exit codes %v, flags %v", d.ExitCodes, names(d.Flags))
 	}
 	var keys map[string]any
@@ -392,10 +453,14 @@ func TestDescribe(t *testing.T) {
 	if _, ok := keys["usage"]; ok {
 		t.Error("the top level has a usage line")
 	}
-	want := map[string][]string{"files": {"help", "json", "limit"}, "touch": {"dry-run", "help", "json", "yes"}}
+	want := map[string][]string{
+		"files":  {"help", "json", "limit"},
+		"touch":  {"dry-run", "help", "json", "yes"},
+		"forget": {"dry-run", "help", "json", "yes"},
+	}
 	for _, c := range d.Commands {
 		if w, ok := want[c.Name]; ok {
-			if !slices.Equal(names(c.Flags), w) || c.Mutates != (c.Name == "touch") || len(c.Examples) == 0 {
+			if !slices.Equal(names(c.Flags), w) || c.Mutates != (c.Name != "files") || len(c.Examples) == 0 {
 				t.Errorf("%s: flags %v, mutates %v, examples %v", c.Name, names(c.Flags), c.Mutates, c.Examples)
 			}
 			delete(want, c.Name)

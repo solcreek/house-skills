@@ -87,6 +87,9 @@ case "$stack" in
   go)
     {
       go mod init "$name" &&
+      # The oldest Go the template needs (range over int), not this machine's
+      # patch release, so a teammate's toolchain is not forced to upgrade.
+      go mod edit -go=1.22 &&
       go get github.com/spf13/cobra@latest &&
       go mod tidy
     } > "$log" 2>&1 || failed "go mod / go get"

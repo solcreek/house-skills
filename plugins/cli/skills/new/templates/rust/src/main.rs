@@ -36,6 +36,13 @@ enum Command {
         #[command(flatten)]
         change: Change,
     },
+    /// Remove a file from what touch has created
+    Forget {
+        /// The file to forget
+        path: PathBuf,
+        #[command(flatten)]
+        change: Change,
+    },
     /// Print every command, flag and exit code as JSON
     Describe,
 }
@@ -71,16 +78,18 @@ fn whole_number(s: &str) -> Result<usize, String> {
 }
 
 // Every exit code, in help and in `describe`. Add to it; never reuse one.
-const EXIT: &[(&str, u8)] = &[("ok", 0), ("failed", 1), ("usage", 2), ("partial", 3)];
+const EXIT: &[(&str, u8)] = &[("ok", 0), ("failed", 1), ("usage", 2), ("partial", 3), ("busy", 4)];
 const FAILED: u8 = 1;
 const USAGE: u8 = 2;
 const PARTIAL: u8 = 3;
-const EXIT_HELP: &str = "Exit codes: 0 ok, 1 failed, 2 usage, 3 partial";
+const BUSY: u8 = 4;
+const EXIT_HELP: &str = "Exit codes: 0 ok, 1 failed, 2 usage, 3 partial, 4 busy";
 
 // Each command's examples: shown in its help and listed by describe.
 const EXAMPLES: &[(&str, &[&str])] = &[
     ("files", &["tool files", "tool files src --limit 5 --json"]),
     ("touch", &["tool touch notes.txt --dry-run", "tool touch notes.txt --yes --json"]),
+    ("forget", &["tool forget notes.txt --dry-run", "tool forget notes.txt --yes --json"]),
     ("describe", &["tool describe"]),
 ];
 
@@ -114,6 +123,18 @@ impl std::fmt::Display for Usage {
 
 impl std::error::Error for Usage {}
 
+/// Another run holds a lock this one needs: nothing changed, retry (exit 4).
+#[derive(Debug)]
+struct Busy(String);
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Busy {}
+
 fn main() -> ExitCode {
     // Error path only: parsing may fail before it sees --json.
     let json_asked = std::env::args().skip(1).take_while(|a| a != "--").any(|a| a == "--json");
@@ -139,6 +160,7 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             let usage = e.is::<Usage>();
+            let busy = e.is::<Busy>();
             eprintln!("tool: {e:#}");
             if usage {
                 eprintln!("Run 'tool --help' for usage.");
@@ -146,7 +168,13 @@ fn main() -> ExitCode {
             if cli.json {
                 println!("{}", json!({ "error": format!("{e:#}"), "usage": usage }));
             }
-            ExitCode::from(if usage { USAGE } else { FAILED })
+            ExitCode::from(if usage {
+                USAGE
+            } else if busy {
+                BUSY
+            } else {
+                FAILED
+            })
         }
     }
 }
@@ -168,7 +196,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 Ok(_) => {}
             }
             // Walk the real path, so a symlinked DIR (or current directory)
-            // lists its files, and paths compare with the tool's own homes.
+            // lists its files, and paths compare with this CLI's own homes.
             let root = given.canonicalize()?;
             // What cannot be read inside the tree is a problem, never silently
             // "nothing there" (rubric A7). The root itself unreadable is a failure.
@@ -213,13 +241,50 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     .map_err(|e| anyhow!("cannot create {}: {}", target.display(), reason(&e)))?;
             }
             let shown = target.display().to_string();
-            // State: what this tool created, kept across runs.
+            // State: what this CLI created, kept across runs.
             let recorded = changed && change.yes && append_state("history.jsonl", &json!({ "path": shown }));
             let verb = if !changed { "exists" } else if change.dry_run { "would create" } else { "created" };
             if cli.json {
                 println!("{}", json!({ "path": shown, "changed": changed, "dryRun": change.dry_run, "recorded": recorded }));
             } else {
                 println!("{verb} {shown}");
+            }
+        }
+        Command::Forget { path, change } => {
+            // Writing state is this command's action, so failing to is failing.
+            plain("PATH", &path.to_string_lossy())?;
+            let state = home("state").ok_or_else(|| anyhow!("no home directory; set TOOL_HOME or XDG_STATE_HOME"))?;
+            let target = lexical(&std::path::absolute(path)?).display().to_string();
+            let file = state.join("history.jsonl");
+            let edit = || -> anyhow::Result<usize> {
+                let text = match std::fs::read_to_string(&file) {
+                    Ok(t) => t,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(e) => bail!("cannot read {}: {}", file.display(), reason(&e)),
+                };
+                // A line that does not parse is kept: unknown, never gone.
+                let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+                let kept: Vec<&str> = lines
+                    .iter()
+                    .copied()
+                    .filter(|l| serde_json::from_str::<Value>(l).map_or(true, |v| v["path"] != target.as_str()))
+                    .collect();
+                let removed = lines.len() - kept.len();
+                if removed > 0 && change.yes {
+                    let data: String = kept.iter().map(|l| format!("{l}\n")).collect();
+                    replace_file(&state, "history.jsonl", data.as_bytes())?;
+                }
+                Ok(removed)
+            };
+            let removed = if change.dry_run || !state.exists() { edit()? } else { with_lock(&state, "history.jsonl", edit)? };
+            let verb = if removed == 0 { "not recorded" } else if change.dry_run { "would forget" } else { "forgot" };
+            if cli.json {
+                println!(
+                    "{}",
+                    json!({ "path": target, "removed": removed, "changed": removed > 0, "dryRun": change.dry_run })
+                );
+            } else {
+                println!("{verb} {target}");
             }
         }
         Command::Describe => println!("{}", serde_json::to_string_pretty(&describe_root())?),
@@ -365,8 +430,8 @@ fn home(kind: &str) -> Option<PathBuf> {
     Some(base.join("tool"))
 }
 
-// The tool's own directories that exist, by real path: a walk skips them
-// (conventions: Paths), so a TOOL_HOME inside the tree is not listed.
+// This CLI's own directories that exist, by real path: a walk skips them
+// (conventions: Paths), so TOOL_HOME inside the tree is not listed.
 fn homes() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = ["config", "cache", "state"].iter().filter_map(|k| home(k)).collect();
     if let Some(d) = std::env::var_os("TOOL_HOME").filter(|d| !d.is_empty()) {
@@ -392,15 +457,90 @@ fn append_state(name: &str, entry: &Value) -> bool {
         .mode(0o700)
         .create(&state)
         .map_err(|e| reason(&e))
-        .and_then(|_| inside(&state, Path::new(name)).map_err(|e| format!("{e:#}")))
-        .and_then(|file| {
-            let mut f = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(file).map_err(|e| reason(&e))?;
-            f.write_all(format!("{entry}\n").as_bytes()).map_err(|e| reason(&e))
+        .and_then(|_| {
+            // Under the lock replace_file takes, so an append never lands in a
+            // file that is being renamed away.
+            with_lock(&state, name, || {
+                let file = inside(&state, Path::new(name))?;
+                let mut f = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(file)?;
+                f.write_all(format!("{entry}\n").as_bytes())?;
+                Ok(())
+            })
+            .map_err(|e| format!("{e:#}"))
         });
     if let Err(why) = &result {
         eprintln!("tool: warning: not recorded in {}: {why}", state.join(name).display());
     }
     result.is_ok()
+}
+
+// Whether pid runs: kill -0, which needs no crate.
+fn running(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+// Run f holding dir/name.lock (conventions: State). The lock is created only
+// if absent and holds our pid; one whose pid is gone is stale and removed.
+// After 2 s of someone else holding it: Busy, exit 4. A run killed before it
+// removes its lock leaves a stale one, which the next run takes.
+fn with_lock<T>(dir: &Path, name: &str, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = inside(dir, Path::new(&format!("{name}.lock")))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut stale = false;
+    loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&lock) {
+            Ok(mut file) => {
+                file.write_all(std::process::id().to_string().as_bytes())?;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => bail!("cannot lock {}: {}", lock.display(), reason(&e)),
+        }
+        let owner: u32 = std::fs::read_to_string(&lock).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if !stale && !(owner > 0 && running(owner)) {
+            stale = true; // once: a second stale lock means another run is racing
+            let _ = std::fs::remove_file(&lock);
+            continue;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(Busy(format!("{} is locked by pid {owner}; retry", dir.join(name).display())).into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let result = f();
+    let _ = std::fs::remove_file(&lock);
+    result
+}
+
+// Replace dir/name with data (conventions: State): a uniquely named temp file
+// beside it, given the target's mode (a new file 0600), renamed over it. The
+// rename never follows a symlink; inside() refused one already.
+fn replace_file(dir: &Path, name: &str, data: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let target = inside(dir, Path::new(name))?;
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let temp = inside(dir, Path::new(&format!(".{name}.{}.{nonce:08x}.tmp", std::process::id())))?;
+    let mode = target.metadata().map_or(0o600, |m| m.permissions().mode() & 0o777);
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temp)
+        .and_then(|mut f| f.write_all(data))
+        // The umask may have narrowed the mode.
+        .and_then(|_| std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode)))
+        .and_then(|_| std::fs::rename(&temp, &target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|e| anyhow!("cannot write {}: {}", target.display(), reason(&e)))
 }
 
 // The same definitions as --help, as data (rubric A10), in the shape every
