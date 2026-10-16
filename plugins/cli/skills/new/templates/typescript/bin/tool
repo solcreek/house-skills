@@ -1,7 +1,16 @@
 #!/usr/bin/env -S node --no-warnings
-// The entry point: turn on Node's compile cache (in the system temp
-// directory), then load the TypeScript source, stripped of types by Node.
+// The entry point: turn on Node's compile cache in this tool's own cache
+// directory (never the shared temp directory, where another user could
+// plant code), then load the TypeScript source, stripped of types by Node.
 import { enableCompileCache } from "node:module";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 
-enableCompileCache?.();
+const { TOOL_HOME, XDG_CACHE_HOME } = process.env;
+const cache = TOOL_HOME
+  ? join(resolve(TOOL_HOME), "cache")
+  : join(XDG_CACHE_HOME && isAbsolute(XDG_CACHE_HOME) ? XDG_CACHE_HOME : join(homedir(), ".cache"), "tool");
+try {
+  enableCompileCache?.(join(cache, "node-compile-cache"));
+} catch {} // no cache is only slower
 await import("../src/main.ts");

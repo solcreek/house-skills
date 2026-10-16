@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +107,7 @@ func TestUsageErrorsExit2(t *testing.T) {
 	cases := [][]string{
 		{"--zz"}, {"nope"}, {"-v"}, {"describe", "zz"},
 		{"files", "a", "b"}, {"files", "--zz"}, {"files", "--limit", "x"}, {"files", "--limit=-1"}, {"files", "A\x07"},
+		{"files", "--limit", "+2"}, {"files", "--limit", "0x3"}, {"files", "--limit", "1_0"},
 		// A mutating command gets --dry-run, or the missing-flag check would answer first.
 		{"touch", "--dry-run"}, {"touch", "a", "b", "--dry-run"}, {"touch", "", "--dry-run"}, {"touch", "x", "--dry-run", "--zz"},
 	}
@@ -152,12 +154,27 @@ func TestAListIsCapped(t *testing.T) {
 	}
 }
 
+func TestLimitIsBase10(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for i := range 12 {
+		must(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%02d", i)), nil, 0o644))
+	}
+	if v := decode(t, run(t, dir, "files", "--limit", "010", "--json").out); v["shown"] != 10.0 {
+		t.Errorf("--limit 010 showed %v, want 10", v["shown"])
+	}
+}
+
 func TestMissingInputAndPartial(t *testing.T) {
 	t.Parallel()
 	dir := tree(t)
 	r := run(t, dir, "files", "nowhere", "--json")
-	if e, _ := decode(t, r.out)["error"].(string); r.code != exitFailed || !strings.Contains(e, "nowhere") {
+	if e, _ := decode(t, r.out)["error"].(string); r.code != exitFailed || !strings.Contains(e, "no such directory") {
 		t.Errorf("missing: exit %d, %q", r.code, r.out)
+	}
+	r = run(t, dir, "files", "a", "--json")
+	if e, _ := decode(t, r.out)["error"].(string); !strings.Contains(e, "not a directory") {
+		t.Errorf("a file: %q", r.out)
 	}
 	if os.Geteuid() == 0 {
 		return // root reads everything
@@ -168,8 +185,46 @@ func TestMissingInputAndPartial(t *testing.T) {
 	must(t, os.Chmod(sub, 0o755))
 	v := decode(t, r.out)
 	problems, _ := v["problems"].([]any)
-	if r.code != exitPartial || len(problems) != 1 || problems[0].(map[string]any)["input"] != "sub" || v["total"] != 2.0 {
+	want := map[string]any{"input": "sub", "error": "permission denied"}
+	if r.code != exitPartial || len(problems) != 1 || fmt.Sprint(problems[0]) != fmt.Sprint(want) || v["total"] != 2.0 {
 		t.Errorf("partial: exit %d, %q", r.code, r.out)
+	}
+	// Nothing readable at all is a failure, not a partial result.
+	must(t, os.Chmod(dir, 0o000))
+	r = run(t, t.TempDir(), "files", dir, "--json")
+	must(t, os.Chmod(dir, 0o755))
+	if e, _ := decode(t, r.out)["error"].(string); r.code != exitFailed || !strings.Contains(e, "permission denied") {
+		t.Errorf("unreadable root: exit %d, %q", r.code, r.out)
+	}
+}
+
+func TestTiesSymlinkedDirAndHome(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, n := range []string{"b2", "B1", "a", "é", "Z"} {
+		must(t, os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644))
+	}
+	var paths []string
+	for _, it := range decode(t, run(t, dir, "files", "--json").out)["items"].([]any) {
+		paths = append(paths, it.(map[string]any)["path"].(string))
+	}
+	if !slices.Equal(paths, []string{"B1", "Z", "a", "b2", "é"}) {
+		t.Errorf("order: %v", paths)
+	}
+	parent := t.TempDir()
+	must(t, os.Symlink(dir, filepath.Join(parent, "link")))
+	if v := decode(t, run(t, parent, "files", "link", "--json").out); v["total"] != 5.0 {
+		t.Errorf("symlinked DIR: %v", v["total"])
+	}
+	home := filepath.Join(dir, ".home")
+	runIn(t, dir, home, "touch", "made", "--yes")
+	if !exists(filepath.Join(home, "state", "history.jsonl")) {
+		t.Fatal("no history")
+	}
+	for _, it := range decode(t, runIn(t, dir, home, "files", "--json").out)["items"].([]any) {
+		if p := it.(map[string]any)["path"].(string); strings.HasPrefix(p, ".home") {
+			t.Errorf("listed the tool's home: %s", p)
+		}
 	}
 }
 
@@ -195,17 +250,49 @@ func TestDryRunYesStateRerun(t *testing.T) {
 		t.Errorf("dry run: %v", v)
 	}
 	v = decode(t, runIn(t, dir, home, "touch", "x", "--yes", "--json").out)
-	if v["changed"] != true || !exists(filepath.Join(dir, "x")) {
+	if v["changed"] != true || v["recorded"] != true || !exists(filepath.Join(dir, "x")) {
 		t.Errorf("--yes: %v", v)
 	}
-	var history []string
-	b, _ := os.ReadFile(filepath.Join(home, "state", "history.json"))
-	if json.Unmarshal(b, &history) != nil || !slices.Equal(history, []string{v["path"].(string)}) {
+	b, _ := os.ReadFile(filepath.Join(home, "state", "history.jsonl"))
+	line, _ := json.Marshal(map[string]string{"path": v["path"].(string)})
+	if string(b) != string(line)+"\n" {
 		t.Errorf("history: %q", b)
 	}
 	r := runIn(t, dir, home, "touch", "x", "--yes", "--json")
-	if r.code != 0 || decode(t, r.out)["changed"] != false {
+	if v := decode(t, r.out); r.code != 0 || v["changed"] != false || v["recorded"] != false {
 		t.Errorf("rerun: exit %d, %q", r.code, r.out)
+	}
+}
+
+func TestStateConcurrentCorruptAndFailed(t *testing.T) {
+	t.Parallel()
+	dir, home := t.TempDir(), t.TempDir()
+	state := filepath.Join(home, "state")
+	must(t, os.Mkdir(state, 0o700))
+	file := filepath.Join(state, "history.jsonl")
+	must(t, os.WriteFile(file, []byte("not json\n"), 0o600))
+	done := make(chan result)
+	for i := range 12 {
+		go func() { done <- runIn(t, dir, home, "touch", fmt.Sprintf("f%d", i), "--yes") }()
+	}
+	for range 12 {
+		if r := <-done; r.code != 0 {
+			t.Errorf("concurrent touch: exit %d, %s", r.code, r.err)
+		}
+	}
+	b, _ := os.ReadFile(file)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if lines[0] != "not json" || len(lines) != 13 {
+		t.Errorf("history after 12 runs: %q", b)
+	}
+	if os.Geteuid() == 0 {
+		return
+	}
+	must(t, os.Chmod(file, 0o400))
+	r := runIn(t, dir, home, "touch", "late", "--yes", "--json")
+	must(t, os.Chmod(file, 0o600))
+	if v := decode(t, r.out); r.code != 0 || v["changed"] != true || v["recorded"] != false || !strings.Contains(r.err, "warning: not recorded") {
+		t.Errorf("failed record: exit %d, %q, %q", r.code, r.out, r.err)
 	}
 }
 

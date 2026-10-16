@@ -1,12 +1,10 @@
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   realpathSync,
-  renameSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -78,8 +76,10 @@ function plain(what: string, s: string): string {
   return s;
 }
 
-// Text from files or the network, made safe to print to a terminal.
-const printable = (s: string) => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "?");
+// Text from files or the network, made safe to print to a terminal: every
+// control character but tab, newline included, so a file name cannot forge
+// a row of output.
+const printable = (s: string) => s.replace(/[\u0000-\u0008\u000a-\u001f\u007f]/g, "?");
 
 // The file an output path names, refused unless it is plainly inside root
 // (rubric A9). Every template's inside() refuses the same things: a `..`
@@ -105,6 +105,15 @@ function inside(root: string, path: string): string {
   return target;
 }
 
+// The tool's own directories that exist, by real path: a walk skips them
+// (conventions: Paths), so a TOOL_HOME inside the tree is not listed.
+function homes(): Set<string> {
+  const dirs = [process.env.TOOL_HOME ? resolve(process.env.TOOL_HOME) : "", ...KINDS.map(home)];
+  return new Set(dirs.filter((d) => d && existsSync(d)).map((d) => realpathSync(d)));
+}
+
+const KINDS = ["config", "cache", "state"] as const;
+
 // Where config, cache and state live (conventions: State). TOOL_HOME moves
 // all three under one directory; tests set it.
 function home(kind: "config" | "cache" | "state"): string {
@@ -117,20 +126,27 @@ function home(kind: "config" | "cache" | "state"): string {
   return join(base && isAbsolute(base) ? base : join(homedir(), fallback), NAME);
 }
 
-// Replace root/name with data: write a temp file beside it, then rename over
-// it, so a crash never leaves half a file and nothing is written through a
-// symlink.
-function writeAtomic(root: string, name: string, data: string) {
-  mkdirSync(root, { recursive: true });
-  const target = inside(root, name);
-  const temp = inside(root, `.${basename(name)}.${process.pid}.tmp`);
+// Append one JSON line to a state file (conventions: State). Appending
+// never reads the file back, so a corrupt or unreadable one is never
+// overwritten, and concurrent runs never lose each other's lines. Recording
+// is not the command's action: a failure is a warning, and the result says
+// recorded: false.
+function appendState(name: string, entry: unknown): boolean {
+  const state = home("state");
   try {
-    writeFileSync(temp, data, { flag: "wx" });
-    renameSync(temp, target);
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    appendFileSync(inside(state, name), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    return true;
   } catch (e) {
-    rmSync(temp, { force: true });
-    throw new Failure(`cannot write ${target}: ${(e as { code?: string }).code ?? e}`);
+    console.error(`${NAME}: warning: not recorded in ${join(state, name)}: ${reason(e)}`);
+    return false;
   }
+}
+
+// An error's reason without the path it repeats: "permission denied".
+function reason(e: unknown): string {
+  const m = e instanceof Error ? e.message : String(e);
+  return (/^[A-Z]+: ([^,]+)/.exec(m)?.[1] ?? m).trim();
 }
 
 // A list, capped (conventions: JSON output, Human output). The note goes to
@@ -151,24 +167,33 @@ const commands: Command[] = [
     mutates: false,
     options: { limit: LIMIT },
     run(values, [dir = "."]) {
-      const root = resolve(plain("DIR", dir));
-      if (!existsSync(root) || !statSync(root).isDirectory()) throw new Failure(`no such directory: ${root}`);
-      // Walk without following symlinks; what cannot be read is a problem,
-      // never silently "nothing there" (rubric A7).
+      // Lexically, like the other templates: `a/..` is the current directory.
+      const given = resolve(plain("DIR", dir));
+      if (!existsSync(given)) throw new Failure(`no such directory: ${given}`);
+      if (!statSync(given).isDirectory()) throw new Failure(`not a directory: ${given}`);
+      // Walk the real path, so a symlinked DIR (or current directory) lists
+      // its files, and paths compare with the tool's own homes below.
+      const root = realpathSync(given);
+      const own = homes();
+      // What cannot be read inside the tree is a problem, never silently
+      // "nothing there" (rubric A7). The root itself unreadable is a failure.
       const found: { path: string; bytes: number }[] = [];
       const problems: Problem[] = [];
-      const problem = (p: string, e: unknown) =>
-        problems.push({ input: relative(root, p) || ".", error: (e as { code?: string }).code ?? String(e) });
+      const problem = (p: string, e: unknown) => problems.push({ input: relative(root, p), error: reason(e) });
       const walk = (d: string) => {
         let entries;
         try {
           entries = readdirSync(d, { withFileTypes: true });
         } catch (e) {
+          if (d === root) throw new Failure(`cannot read ${given}: ${reason(e)}`);
           return problem(d, e);
         }
         for (const e of entries) {
           const p = join(d, e.name);
-          if (e.isDirectory()) walk(p);
+          // Symlinks are entries of their own type: never followed.
+          if (e.isDirectory()) {
+            if (!own.has(p)) walk(p);
+          }
           else if (e.isFile()) {
             try {
               found.push({ path: relative(root, p), bytes: statSync(p).size });
@@ -179,7 +204,8 @@ const commands: Command[] = [
         }
       };
       walk(root);
-      found.sort((a, b) => b.bytes - a.bytes || a.path.localeCompare(b.path));
+      // Ties by byte order, as Rust and Go sort, never by locale.
+      found.sort((a, b) => b.bytes - a.bytes || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
       const list = capped(found, Number(values.limit));
       emit(values, { root, ...list, ...(problems.length ? { problems } : {}) }, () =>
         list.items.map((f) => `${f.bytes}\t${printable(f.path)}`).join("\n"),
@@ -205,18 +231,13 @@ const commands: Command[] = [
           writeFileSync(target, "", { flag: "wx" });
         } catch (e) {
           // Expected (permissions, a race): a failure naming the file, not a bug.
-          throw new Failure(`cannot create ${target}: ${(e as { code?: string }).code ?? e}`);
+          throw new Failure(`cannot create ${target}: ${reason(e)}`);
         }
-        // State (conventions): what this tool created, kept across runs.
-        const state = home("state");
-        let history: string[] = [];
-        try {
-          history = JSON.parse(readFileSync(join(state, "history.json"), "utf8"));
-        } catch {} // none yet, or unreadable: start over
-        writeAtomic(state, "history.json", JSON.stringify([...history, target]));
       }
+      // State: what this tool created, kept across runs.
+      const recorded = changed && !dryRun ? appendState("history.jsonl", { path: target }) : false;
       const verb = !changed ? "exists" : dryRun ? "would create" : "created";
-      emit(values, { path: target, changed, dryRun }, () => `${verb} ${target}`);
+      emit(values, { path: target, changed, dryRun, recorded }, () => `${verb} ${target}`);
       return EXIT.ok;
     },
   },
@@ -270,7 +291,7 @@ function commandHelp(c: Command): string {
     "",
     `${c.summary[0].toUpperCase()}${c.summary.slice(1)}.`,
     ...(c.mutates ? ["Changes things: pass --dry-run to preview, --yes to apply."] : []),
-    ...c.args.filter((a) => a.default !== undefined).map((a) => `${a.name} defaults to ${a.default}.`),
+    ...c.args.filter((a) => a.default !== undefined).map((a) => `${a.name} defaults to "${a.default}".`),
     "",
     bold("Options:"),
     ...rows.map(([flag, text]) => `  ${flag.padEnd(width)}  ${text}`),

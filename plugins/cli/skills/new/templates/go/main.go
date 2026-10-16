@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -73,6 +74,7 @@ func newRoot() *cobra.Command {
 	files := &cobra.Command{
 		Use:     "files [DIR]",
 		Short:   "List the files under a directory, largest first",
+		Long:    "List the files under a directory, largest first.\nDIR defaults to \".\".",
 		Example: "  tool files\n  tool files src --limit 5 --json",
 		// The default of an optional positional, for help and describe.
 		Annotations: map[string]string{"default.DIR": "."},
@@ -85,14 +87,31 @@ func newRoot() *cobra.Command {
 			if _, err := plain("DIR", dir); err != nil {
 				return err
 			}
-			root, err := filepath.Abs(dir)
+			// Lexically, like the other templates: `a/..` is the current directory.
+			given, err := filepath.Abs(dir)
 			if err != nil {
 				return err
 			}
-			if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-				return fmt.Errorf("no such directory: %s", root)
+			switch fi, err := os.Stat(given); {
+			case errors.Is(err, os.ErrNotExist):
+				return fmt.Errorf("no such directory: %s", given)
+			case err != nil:
+				return fmt.Errorf("cannot read %s: %s", given, cause(err))
+			case !fi.IsDir():
+				return fmt.Errorf("not a directory: %s", given)
 			}
-			limit, _ := cmd.Flags().GetUint("limit")
+			// Walk the real path: WalkDir does not follow a symlinked root, and
+			// paths then compare with the tool's own homes.
+			root, err := filepath.EvalSymlinks(given)
+			if err != nil {
+				return fmt.Errorf("cannot read %s: %s", given, cause(err))
+			}
+			// The root itself unreadable is a failure, not a partial result.
+			if _, err := os.ReadDir(root); err != nil {
+				return fmt.Errorf("cannot read %s: %s", given, cause(err))
+			}
+			own := homes()
+			limit := cmd.Flags().Lookup("limit").Value.(*wholeNumber).n
 			type file struct {
 				Path  string `json:"path"`
 				Bytes int64  `json:"bytes"`
@@ -106,6 +125,9 @@ func newRoot() *cobra.Command {
 				if err != nil {
 					problems = append(problems, map[string]string{"input": rel, "error": cause(err)})
 					return nil
+				}
+				if d.IsDir() && p != root && own[p] {
+					return filepath.SkipDir
 				}
 				if d.Type().IsRegular() {
 					if info, err := d.Info(); err == nil {
@@ -148,7 +170,8 @@ func newRoot() *cobra.Command {
 			return nil
 		},
 	}
-	files.Flags().Uint("limit", 20, "show at most N items; 0 for all")
+	limit := wholeNumber{n: 20}
+	files.Flags().Var(&limit, "limit", "show at most `N` items; 0 for all")
 	root.AddCommand(files)
 
 	touch := &cobra.Command{
@@ -183,22 +206,14 @@ func newRoot() *cobra.Command {
 					return fmt.Errorf("cannot create %s: %s", target, cause(err))
 				}
 				f.Close()
-				// State (conventions): what this tool created, kept across runs.
-				state := home("state")
-				var history []string
-				if b, err := os.ReadFile(filepath.Join(state, "history.json")); err == nil {
-					_ = json.Unmarshal(b, &history) // unreadable: start over
-				}
-				b, _ := json.Marshal(append(history, target))
-				if err := writeAtomic(state, "history.json", b); err != nil {
-					return err
-				}
 			}
+			// State: what this tool created, kept across runs.
+			recorded := changed && !dryRun && appendState("history.jsonl", map[string]string{"path": target})
 			verb := map[bool]string{true: "created", false: "exists"}[changed]
 			if changed && dryRun {
 				verb = "would create"
 			}
-			return output(cmd, map[string]any{"path": target, "changed": changed, "dryRun": dryRun}, verb+" "+target)
+			return output(cmd, map[string]any{"path": target, "changed": changed, "dryRun": dryRun, "recorded": recorded}, verb+" "+target)
 		},
 	}
 	mutating(touch)
@@ -314,7 +329,9 @@ func inside(root, path string) (string, error) {
 }
 
 // home is where config, cache or state live (conventions: State).
-// TOOL_HOME moves all three under one directory; tests set it.
+// TOOL_HOME moves all three under one directory; tests set it. Empty when
+// there is no home to put them in (HOME unset, as under cron): never the
+// current directory.
 func home(kind string) string {
 	if dir := os.Getenv("TOOL_HOME"); dir != "" {
 		abs, _ := filepath.Abs(dir)
@@ -327,41 +344,79 @@ func home(kind string) string {
 	}[kind]
 	base := os.Getenv(vars[0])
 	if !filepath.IsAbs(base) { // XDG says to ignore a relative path
-		h, _ := os.UserHomeDir()
+		h, err := os.UserHomeDir()
+		if err != nil || !filepath.IsAbs(h) {
+			return ""
+		}
 		base = filepath.Join(h, vars[1])
 	}
 	return filepath.Join(base, "tool")
 }
 
-// writeAtomic replaces root/name with data: a temp file beside it, then a
-// rename over it, so a crash never leaves half a file and nothing is written
-// through a symlink.
-func writeAtomic(root, name string, data []byte) error {
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return fmt.Errorf("cannot create %s: %s", root, cause(err))
-	}
-	target, err := inside(root, name)
-	if err != nil {
-		return err
-	}
-	temp, err := inside(root, fmt.Sprintf(".%s.%d.tmp", name, os.Getpid()))
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err == nil {
-		_, err = f.Write(data)
-		if cerr := f.Close(); err == nil {
-			err = cerr
+// homes is the tool's own directories that exist, by real path: a walk
+// skips them (conventions: Paths), so a TOOL_HOME inside the tree is not
+// listed.
+func homes() map[string]bool {
+	own := map[string]bool{}
+	for _, d := range []string{os.Getenv("TOOL_HOME"), home("config"), home("cache"), home("state")} {
+		if d == "" {
+			continue
+		}
+		if real, err := filepath.EvalSymlinks(d); err == nil {
+			own[real] = true
 		}
 	}
+	return own
+}
+
+// appendState appends one JSON line to a state file (conventions: State).
+// Appending never reads the file back, so a corrupt or unreadable one is
+// never overwritten, and concurrent runs never lose each other's lines.
+// Recording is not the command's action: a failure is a warning, and the
+// result says recorded: false.
+func appendState(name string, entry any) bool {
+	state := home("state")
+	if state == "" {
+		fmt.Fprintln(os.Stderr, "tool: warning: not recorded: no home directory; set TOOL_HOME or XDG_STATE_HOME")
+		return false
+	}
+	err := os.MkdirAll(state, 0o700)
+	var file string
 	if err == nil {
-		err = os.Rename(temp, target)
+		file, err = inside(state, name)
+	}
+	if err == nil {
+		var f *os.File
+		if f, err = os.OpenFile(file, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600); err == nil {
+			line, _ := json.Marshal(entry)
+			_, err = f.Write(append(line, '\n'))
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+		}
 	}
 	if err != nil {
-		os.Remove(temp)
-		return fmt.Errorf("cannot write %s: %w", target, err)
+		fmt.Fprintf(os.Stderr, "tool: warning: not recorded in %s: %s\n", filepath.Join(state, name), cause(err))
+		return false
 	}
+	return true
+}
+
+// wholeNumber is a flag that takes base-10 digits only, as in every template:
+// pflag's own Uint would read 010 as octal and take 0x3 and 1_0.
+type wholeNumber struct{ n int }
+
+func (w *wholeNumber) String() string { return strconv.Itoa(w.n) }
+func (w *wholeNumber) Type() string   { return "uint" }
+func (w *wholeNumber) Set(s string) error {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return fmt.Errorf("takes a whole number, got %q", s)
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("%q is too large", s)
+	}
+	w.n = n
 	return nil
 }
 
@@ -423,7 +478,8 @@ func describe(c *cobra.Command) map[string]any {
 			def = f.DefValue
 		}
 		flags = append(flags, map[string]any{
-			"name": f.Name, "short": short, "type": kind, "default": def, "description": f.Usage,
+			"name": f.Name, "short": short, "type": kind, "default": def,
+			"description": strings.ReplaceAll(f.Usage, "`", ""), // backquotes name the placeholder
 		})
 	}
 	c.LocalFlags().VisitAll(add)

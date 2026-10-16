@@ -58,8 +58,16 @@ struct Change {
 #[derive(clap::Args)]
 struct Limit {
     /// Show at most N items; 0 for all
-    #[arg(long, value_name = "N", default_value_t = 20)]
+    #[arg(long, value_name = "N", default_value = "20", value_parser = whole_number)]
     limit: usize,
+}
+
+// Base-10 digits only, as in every template: no sign, no 0x, no underscore.
+fn whole_number(s: &str) -> Result<usize, String> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("takes a whole number".into());
+    }
+    s.parse().map_err(|_| "is too large".into())
 }
 
 // Every exit code, in help and in `describe`. Add to it; never reuse one.
@@ -151,15 +159,25 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     match cmd {
         Command::Files { dir, limit } => {
             plain("DIR", &dir.to_string_lossy())?;
-            let root = std::path::absolute(dir)?;
-            if !root.is_dir() {
-                bail!("no such directory: {}", root.display());
+            // Lexically, like the other templates: `a/..` is the current directory.
+            let given = lexical(&std::path::absolute(dir)?);
+            match given.metadata() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("no such directory: {}", given.display()),
+                Err(e) => bail!("cannot read {}: {}", given.display(), reason(&e)),
+                Ok(m) if !m.is_dir() => bail!("not a directory: {}", given.display()),
+                Ok(_) => {}
             }
-            // Walk without following symlinks; what cannot be read is a
-            // problem, never silently "nothing there" (rubric A7).
+            // Walk the real path, so a symlinked DIR (or current directory)
+            // lists its files, and paths compare with the tool's own homes.
+            let root = given.canonicalize()?;
+            // What cannot be read inside the tree is a problem, never silently
+            // "nothing there" (rubric A7). The root itself unreadable is a failure.
+            if let Err(e) = std::fs::read_dir(&root) {
+                bail!("cannot read {}: {}", given.display(), reason(&e));
+            }
             let mut found: Vec<(String, u64)> = Vec::new();
             let mut problems: Vec<Value> = Vec::new();
-            walk(&root, &root, &mut found, &mut problems);
+            walk(&root, &root, &homes(), &mut found, &mut problems);
             found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             let list = capped(&found, limit.limit);
             if cli.json {
@@ -192,20 +210,14 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     .write(true)
                     .create_new(true)
                     .open(&target)
-                    .with_context(|| format!("cannot create {}", target.display()))?;
-                // State (conventions): what this tool created, kept across runs.
-                let state = home("state");
-                let mut history: Vec<String> = std::fs::read(state.join("history.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default(); // none yet, or unreadable: start over
-                history.push(target.display().to_string());
-                write_atomic(&state, "history.json", &serde_json::to_vec(&history)?)?;
+                    .map_err(|e| anyhow!("cannot create {}: {}", target.display(), reason(&e)))?;
             }
-            let verb = if !changed { "exists" } else if change.dry_run { "would create" } else { "created" };
             let shown = target.display().to_string();
+            // State: what this tool created, kept across runs.
+            let recorded = changed && change.yes && append_state("history.jsonl", &json!({ "path": shown }));
+            let verb = if !changed { "exists" } else if change.dry_run { "would create" } else { "created" };
             if cli.json {
-                println!("{}", json!({ "path": shown, "changed": changed, "dryRun": change.dry_run }));
+                println!("{}", json!({ "path": shown, "changed": changed, "dryRun": change.dry_run, "recorded": recorded }));
             } else {
                 println!("{verb} {shown}");
             }
@@ -215,28 +227,59 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn walk(root: &Path, dir: &Path, found: &mut Vec<(String, u64)>, problems: &mut Vec<Value>) {
-    let rel = |p: &Path| {
-        let r = p.strip_prefix(root).unwrap_or(p);
-        if r.as_os_str().is_empty() { ".".to_string() } else { r.display().to_string() }
-    };
+fn walk(root: &Path, dir: &Path, own: &[PathBuf], found: &mut Vec<(String, u64)>, problems: &mut Vec<Value>) {
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(e) => return problems.push(json!({ "input": rel(dir), "error": e.to_string() })),
+        Err(e) => return problems.push(json!({ "input": rel(dir), "error": reason(&e) })),
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        // An entry the listing could not read leaves it incomplete: a problem.
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                problems.push(json!({ "input": rel(dir), "error": reason(&e) }));
+                continue;
+            }
+        };
         let path = entry.path();
         // DirEntry::file_type does not follow symlinks.
         match entry.file_type() {
-            Ok(t) if t.is_dir() => walk(root, &path, found, problems),
+            Ok(t) if t.is_dir() => {
+                if !own.contains(&path) {
+                    walk(root, &path, own, found, problems)
+                }
+            }
             Ok(t) if t.is_file() => match entry.metadata() {
                 Ok(m) => found.push((rel(&path), m.len())),
-                Err(e) => problems.push(json!({ "input": rel(&path), "error": e.to_string() })),
+                Err(e) => problems.push(json!({ "input": rel(&path), "error": reason(&e) })),
             },
             Ok(_) => {}
-            Err(e) => problems.push(json!({ "input": rel(&path), "error": e.to_string() })),
+            Err(e) => problems.push(json!({ "input": rel(&path), "error": reason(&e) })),
         }
     }
+}
+
+// An error's reason without the path it repeats: "permission denied", the
+// same words in every template.
+fn reason(e: &std::io::Error) -> String {
+    e.kind().to_string()
+}
+
+// A path with `.` and `..` resolved by its text, as Node's resolve and Go's
+// Clean do.
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 struct Capped<'a, T> {
@@ -305,10 +348,11 @@ fn inside(root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 // Where config, cache and state live (conventions: State). TOOL_HOME moves
-// all three under one directory; tests set it.
-fn home(kind: &str) -> PathBuf {
+// all three under one directory; tests set it. None when there is no home
+// to put them in (HOME unset, as under cron): never the current directory.
+fn home(kind: &str) -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("TOOL_HOME").filter(|d| !d.is_empty()) {
-        return std::path::absolute(PathBuf::from(dir)).unwrap_or_default().join(kind);
+        return std::path::absolute(PathBuf::from(dir)).ok().map(|d| d.join(kind));
     }
     let (var, fallback) = match kind {
         "config" => ("XDG_CONFIG_HOME", ".config"),
@@ -317,28 +361,46 @@ fn home(kind: &str) -> PathBuf {
     };
     // XDG says to ignore a relative path.
     let base = std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute());
-    let base = base.unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(fallback));
-    base.join("tool")
+    let base = base.or_else(|| std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute()).map(|h| h.join(fallback)))?;
+    Some(base.join("tool"))
 }
 
-// Replace root/name with data: write a temp file beside it, then rename over
-// it, so a crash never leaves half a file and nothing is written through a
-// symlink.
-fn write_atomic(root: &Path, name: &str, data: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write;
-    std::fs::create_dir_all(root).with_context(|| format!("cannot create {}", root.display()))?;
-    let target = inside(root, Path::new(name))?;
-    let temp = inside(root, Path::new(&format!(".{name}.{}.tmp", std::process::id())))?;
-    let result = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .and_then(|mut f| f.write_all(data))
-        .and_then(|_| std::fs::rename(&temp, &target));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+// The tool's own directories that exist, by real path: a walk skips them
+// (conventions: Paths), so a TOOL_HOME inside the tree is not listed.
+fn homes() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = ["config", "cache", "state"].iter().filter_map(|k| home(k)).collect();
+    if let Some(d) = std::env::var_os("TOOL_HOME").filter(|d| !d.is_empty()) {
+        dirs.push(PathBuf::from(d));
     }
-    result.with_context(|| format!("cannot write {}", target.display()))
+    dirs.iter().filter_map(|d| d.canonicalize().ok()).collect()
+}
+
+// Append one JSON line to a state file (conventions: State). Appending never
+// reads the file back, so a corrupt or unreadable one is never overwritten,
+// and concurrent runs never lose each other's lines. Recording is not the
+// command's action: a failure is a warning, and the result says
+// recorded: false.
+fn append_state(name: &str, entry: &Value) -> bool {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let Some(state) = home("state") else {
+        eprintln!("tool: warning: not recorded: no home directory; set TOOL_HOME or XDG_STATE_HOME");
+        return false;
+    };
+    let result = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&state)
+        .map_err(|e| reason(&e))
+        .and_then(|_| inside(&state, Path::new(name)).map_err(|e| format!("{e:#}")))
+        .and_then(|file| {
+            let mut f = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(file).map_err(|e| reason(&e))?;
+            f.write_all(format!("{entry}\n").as_bytes()).map_err(|e| reason(&e))
+        });
+    if let Err(why) = &result {
+        eprintln!("tool: warning: not recorded in {}: {why}", state.join(name).display());
+    }
+    result.is_ok()
 }
 
 // The same definitions as --help, as data (rubric A10), in the shape every

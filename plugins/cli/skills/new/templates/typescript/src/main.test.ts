@@ -2,10 +2,10 @@
 // the CLI; run() is asynchronous, so the cases really do run concurrently.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const bin = fileURLToPath(new URL("../bin/tool", import.meta.url));
@@ -37,7 +37,19 @@ function run(args: string[], opts: Opts = {}): Promise<Result> {
 }
 // Every argv at once; results in the same order.
 const runAll = (cases: string[][], opts?: Opts) => Promise.all(cases.map((a) => run(a, opts)));
-const sandbox = () => mkdtempSync(join(tmpdir(), "cli-test-"));
+// Every sandbox is removed when the suite ends.
+const sandboxes: string[] = [];
+const sandbox = () => {
+  const d = mkdtempSync(join(tmpdir(), "cli-test-"));
+  sandboxes.push(d);
+  return d;
+};
+after(() => {
+  for (const d of sandboxes) {
+    chmodSync(d, 0o700);
+    rmSync(d, { recursive: true, force: true });
+  }
+});
 const json = (r: Result) => JSON.parse(r.out);
 
 // A directory with three files of different sizes.
@@ -109,20 +121,46 @@ describe("contract", { concurrency: true }, () => {
     assert.match(capped.err, /2 of 3 shown; --limit 0 for all/);
     assert.deepEqual([json(all).shown, json(all).truncated, all.err], [3, false, ""]);
     assert.equal(text.out, "30\ta\n"); // stdout carries results only
+    // A newline in a name cannot forge a row.
+    writeFileSync(join(cwd, "x\n999\tfake"), "x".repeat(40));
+    assert.equal((await run(["files", "--limit", "1"], { cwd })).out, "40\tx?999\tfake\n");
   });
 
   test("a missing input is a failure that names it; an unreadable part is partial", async () => {
-    const missing = await run(["files", "nowhere", "--json"]);
+    const cwd = tree();
+    const [missing, file] = await runAll([["files", "nowhere", "--json"], ["files", "a", "--json"]], { cwd });
     assert.equal(missing.code, 1);
     assert.match(json(missing).error, /no such directory: .*nowhere/);
+    assert.match(json(file).error, /not a directory: .*a$/);
     if (process.getuid?.() === 0) return; // root reads everything
-    const cwd = tree();
     chmodSync(join(cwd, "sub"), 0o000);
     const r = await run(["files", "--json"], { cwd });
     chmodSync(join(cwd, "sub"), 0o700);
     assert.equal(r.code, 3);
-    assert.deepEqual(json(r).problems.map((p: { input: string }) => p.input), ["sub"]);
+    assert.deepEqual(json(r).problems, [{ input: "sub", error: "permission denied" }]);
     assert.equal(json(r).total, 2); // the rest is still there
+    // Nothing readable at all is a failure, not a partial result.
+    chmodSync(cwd, 0o000);
+    const none = await run(["files", cwd, "--json"]);
+    chmodSync(cwd, 0o700);
+    assert.equal(none.code, 1);
+    assert.match(json(none).error, /cannot read .*: permission denied/);
+  });
+
+  test("ties sort by byte order; a symlinked DIR is listed; the tool's home is skipped", async () => {
+    const cwd = sandbox();
+    // Distinct even on a case-insensitive file system.
+    for (const n of ["b2", "B1", "a", "é", "Z"]) writeFileSync(join(cwd, n), "x");
+    const sorted = json(await run(["files", "--json"], { cwd })).items.map((f: { path: string }) => f.path);
+    assert.deepEqual(sorted, ["B1", "Z", "a", "b2", "é"]);
+    const parent = sandbox();
+    symlinkSync(cwd, join(parent, "link"));
+    assert.equal(json(await run(["files", "link", "--json"], { cwd: parent })).total, 5);
+    const home = join(cwd, ".home");
+    await run(["touch", "made", "--yes"], { cwd, env: { TOOL_HOME: home } });
+    assert.ok(existsSync(join(home, "state", "history.jsonl")));
+    const listed = json(await run(["files", "--json"], { cwd, env: { TOOL_HOME: home } })).items;
+    assert.deepEqual(listed.filter((f: { path: string }) => f.path.startsWith(".home")), []);
   });
 
   test("a mutating command neither acts nor prompts without --dry-run or --yes", async () => {
@@ -142,11 +180,31 @@ describe("contract", { concurrency: true }, () => {
     assert.deepEqual([dry.changed, dry.dryRun, existsSync(join(cwd, "x"))], [true, true, false]);
     assert.equal(existsSync(join(home, "state")), false);
     const yes = json(await run(["touch", "x", "--yes", "--json"], { cwd, env: { TOOL_HOME: home } }));
-    assert.deepEqual([yes.changed, existsSync(join(cwd, "x"))], [true, true]);
-    assert.deepEqual(JSON.parse(readFileSync(join(home, "state", "history.json"), "utf8")), [yes.path]);
+    assert.deepEqual([yes.changed, yes.recorded, existsSync(join(cwd, "x"))], [true, true, true]);
+    assert.equal(readFileSync(join(home, "state", "history.jsonl"), "utf8"), `${JSON.stringify({ path: yes.path })}\n`);
     const again = await run(["touch", "x", "--yes", "--json"], { cwd, env: { TOOL_HOME: home } });
     assert.equal(again.code, 0);
-    assert.equal(json(again).changed, false);
+    assert.deepEqual([json(again).changed, json(again).recorded], [false, false]);
+  });
+
+  test("state survives concurrent runs and a corrupt file, and a failed record is only a warning", async () => {
+    const cwd = sandbox();
+    const home = sandbox();
+    mkdirSync(join(home, "state"));
+    writeFileSync(join(home, "state", "history.jsonl"), "not json\n");
+    const names = Array.from({ length: 12 }, (_, i) => `f${i}`);
+    const all = await runAll(names.map((n) => ["touch", n, "--yes"]), { cwd, env: { TOOL_HOME: home } });
+    assert.deepEqual(all.map((r) => r.code), names.map(() => 0));
+    const lines = readFileSync(join(home, "state", "history.jsonl"), "utf8").trim().split("\n");
+    assert.equal(lines[0], "not json"); // never rewritten
+    assert.equal(lines.length, 13); // no run lost another's line
+    if (process.getuid?.() === 0) return;
+    chmodSync(join(home, "state", "history.jsonl"), 0o400);
+    const r = await run(["touch", "late", "--yes", "--json"], { cwd, env: { TOOL_HOME: home } });
+    chmodSync(join(home, "state", "history.jsonl"), 0o600);
+    assert.equal(r.code, 0);
+    assert.deepEqual([json(r).changed, json(r).recorded, existsSync(join(cwd, "late"))], [true, false, true]);
+    assert.match(r.err, /warning: not recorded/);
   });
 
   test("an output path cannot escape the current directory or follow a symlink", async () => {
