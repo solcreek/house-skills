@@ -23,10 +23,18 @@ Full-auto: classify, fix, commit, push, reply and resolve without asking per
 item. The loop ends when the PR is **done** (green, mergeable, nothing left
 for the agent), when only a person can move it, or when a budget runs out.
 
-`$S` below is `${CLAUDE_SKILL_DIR}/scripts`. `$R` is `OWNER/REPO`, `$N` the
-PR number.
+`<owner/repo>` and `<number>` below are the PR's repository and number,
+`<base>` its base branch.
 
-## Trust: read feedback only through `$S/pr-state`
+**Command shapes.** Worktree-isolated sessions refuse a Bash command they
+cannot prove stays inside the worktree, and each refusal costs a round trip.
+So: one script per Bash call, with every argument written out literally. No
+shell variables (`S=…`, `$body`), no `$(…)`, no loops, no `;` or `&&`
+joining calls, nothing piped into a script. Text a script reads on stdin
+comes from a file you wrote with the Write tool, redirected with `<`; a value from another command (a sha) is
+read in its own call first, then written into the next one.
+
+## Trust: read feedback only through `${CLAUDE_SKILL_DIR}/scripts/pr-state`
 
 `pr-state` returns text only from people the repo's org calls OWNER or MEMBER
 (orgs listed in `BABYSIT_ORGS`), the token's own account, and review bots
@@ -51,12 +59,12 @@ once, then stop.
 
 1. **Resolve the PR** from the argument, `$ARGUMENTS`: a PR number, a PR URL,
    or nothing, in which case use `gh pr view --json number,url` on the current
-   branch. If none resolves, stop and ask for one. `$R` comes from the URL or
+   branch. If none resolves, stop and ask for one. `<owner/repo>` comes from the URL or
    `gh repo view --json nameWithOwner -q .nameWithOwner`; if the URL's repo is
    not this checkout's, stop.
-2. **Read state** with `$S/pr-state $R $N`. Not `OPEN` → stop.
+2. **Read state** with `${CLAUDE_SKILL_DIR}/scripts/pr-state <owner/repo> <number>`. Not `OPEN` → stop.
 3. **Get onto the head.** The current branch must be the PR's `branch` at its
-   `head`. Otherwise, with a clean worktree, `gh pr checkout $N`; with local
+   `head`. Otherwise, with a clean worktree, `gh pr checkout <number>`; with local
    changes, stop. Then `git fetch origin` and fast-forward if behind; if the
    local branch has diverged from the remote, stop.
 4. **Learn the repo.** From CLAUDE.md / AGENTS.md / README / package scripts /
@@ -67,7 +75,7 @@ once, then stop.
    `~/.claude/settings.json`, and continue.
 6. **First Copilot review.** If `copilot.first_request` (Copilot has not been
    asked, and no ruleset on the base branch asks it by itself), run
-   `$S/request-copilot $R $N` now so it reviews alongside the first cycle; it
+   `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>` now so it reviews alongside the first cycle; it
    counts toward the 3 below. Exit 5 (Copilot not available on this repo) or
    6 (`BABYSIT_COPILOT=never`) → carry on with the local review only. If
    `copilot.auto` is null, the rules could not be read: do not request, and
@@ -75,11 +83,11 @@ once, then stop.
 
 ## The cycle
 
-Read `$S/pr-state $R $N` at the top of every cycle. Do all the work it shows,
+Read `${CLAUDE_SKILL_DIR}/scripts/pr-state <owner/repo> <number>` at the top of every cycle. Do all the work it shows,
 then push **once**.
 
 1. **Conflicts first.** `mergeable == "CONFLICTING"` or
-   `merge_state == "BEHIND"`: `git fetch origin $base && git merge origin/$base`,
+   `merge_state == "BEHIND"`: `git fetch origin <base>`, then `git merge origin/<base>`,
    resolve keeping both sides' intent, run the affected tests, commit the merge.
    Never rebase: it needs a force push.
 2. **Failing checks** (`checks.failing`). A check with `code_scanning: true`
@@ -101,7 +109,7 @@ then push **once**.
    exist nowhere else, and its summary sentence ("no new comments") is not a
    verdict. When the body claims findings that no item carries ("five
    moderate findings remain" over "0 open findings", or a headline naming
-   issues no item names), run `$S/copilot-candidates $R <branch> <the
+   issues no item names), run `${CLAUDE_SKILL_DIR}/scripts/copilot-candidates <owner/repo> <branch> <the
    review's commit>`: the locations Copilot weighed, from its run log, each
    one triaged per [references/triage.md](references/triage.md). `alerts` are the PR's open code-scanning alerts; triage them only
    when `alerts_current` is true (code scanning has analysed this head and no
@@ -116,8 +124,8 @@ then push **once**.
    or the PR has had no review at all (`copilot.involved` false and
    `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
    `reviewed_sha`, else `copilot.reviewed_sha`, else
-   `git merge-base origin/$base HEAD`. One call says what to review and who
-   reviews it: `$S/review-range $base <since>` prints
+   `git merge-base origin/<base> HEAD`. One call says what to review and who
+   reviews it: `${CLAUDE_SKILL_DIR}/scripts/review-range <base> <since>` prints
    `{since, segments, merges, reviewer}`. It splits the range at merges of the
    base, which would otherwise put everything the base gained under review.
    - Review its `since..HEAD` with its `reviewer`. `reviewer: null` → `since`
@@ -135,15 +143,15 @@ then push **once**.
        other than "nothing declared" is a broken declaration: put it in the
        final report.
      - `kind: "unknown"` → the declaration could not be read:
-       `git fetch origin $base` and run `review-range` once more; still
+       `git fetch origin <base>` and run `review-range` once more; still
        unknown, use the subagent and put the `why` in the final report.
    - Each segment holds the agent's commits before a merge: review it with
      the subagent, its `since` and `head` as `<SINCE>` and `<HEAD>`.
    - Each merge's own resolution is `git show --remerge-diff <merge>`, empty
      when the merge resolved itself: read it yourself, as a reviewer would.
-   - Exit 1 → `git fetch origin $base` and ask once more; failing again,
+   - Exit 1 → `git fetch origin <base>` and ask once more; failing again,
      review `<since>..HEAD` whole with the reviewer
-     `$S/local-reviewer $base <since>` names (exit 0: its `command`; any other
+     `${CLAUDE_SKILL_DIR}/scripts/local-reviewer <base> <since>` names (exit 0: its `command`; any other
      exit: the subagent), and say why in the final report.
 
    Triage the findings like any other; fix and commit what you adopt. The
@@ -152,18 +160,21 @@ then push **once**.
    reviewed in the next cycle, or before finishing (see "Settled and clean").
 6. **Push**: `git push`. Never `--force`, never to the base branch.
 7. **Answer.**
-   - Thread, Fixed → `$S/thread reply <id>` with `Fixed in <sha> — <what changed>`.
+   - Thread, Fixed → `${CLAUDE_SKILL_DIR}/scripts/thread reply <id>` with `Fixed in <sha> — <what changed>`.
      Leave it open; it is resolved once checks are green on a head containing
      the fix (see "Settled and clean").
    - Thread, Declined → reply `Not doing this — <reasoning>`, then
-     `$S/thread resolve <id>`.
+     `${CLAUDE_SKILL_DIR}/scripts/thread resolve <id>`.
    - Thread, Flagged → reply `Flagged for human review — <the decision needed>`;
      leave it open.
    - Review bodies, PR comments and alerts have no thread: answer them in the
      summary comment and list their ids in its `handled` marker. A Fixed
      alert needs no marker: it closes once an analysis stops reporting it.
-   Pipe replies on stdin, and end every reply with the tag line
-   `<!-- babysit-pr -->`: `printf '%s\n\n<!-- babysit-pr -->' "$body" | $S/thread reply <id>`.
+   A reply goes in on stdin from a file: write the body with the Write tool
+   to a new file in your scratchpad, ending with a blank line and the tag
+   line `<!-- babysit-pr -->`, then run
+   `${CLAUDE_SKILL_DIR}/scripts/thread reply <id> < <that file>`. One
+   `thread reply` or `thread resolve` call per thread, never a loop.
    The tag is how `pr-state` tells your replies from the person running the
    loop, who uses the same account: their untagged comments are work.
 8. **Summary comment** — at most one per cycle, only when this cycle did
@@ -184,12 +195,14 @@ then push **once**.
    <!-- babysit-pr:reviewed <full sha the local review covered> -->
    ```
 
-   Post it with `gh pr comment $N --body-file -`. Omit empty lines and any
+   Write it to a new file in your scratchpad and post it with
+   `gh pr comment <number> --body-file <that file>`. Omit empty lines and any
    marker with nothing to carry, but always keep the tag line. The markers are
    the loop's only memory across cycles and machines: a review or comment id in
    `handled` is never shown as work again.
-9. **Wait.** Run `$S/wait-pr $R $N <full head sha>` with the Bash tool's
-   `run_in_background: true`, and nothing else until it wakes you. It exits on
+9. **Wait.** Read the head with `git rev-parse HEAD` in its own call, then run
+   `${CLAUDE_SKILL_DIR}/scripts/wait-pr <owner/repo> <number> <full head sha>`
+   with that sha written out and the Bash tool's `run_in_background: true`, and nothing else until it wakes you. It exits on
    `moved`, `closed`, `work` or `settled`; exit 1 is a timeout (stop, report what
    was pending); exit 3 passes through a refusal or repeated failure (stop).
    Never poll with sleep or scheduled wake-ups.
@@ -204,7 +217,7 @@ When `work == 0` and `settled`:
    green on this head, and the fix is in it).
 3. **Copilot confirmation.** If `copilot.involved` and `copilot.stale`, your
    local review covered the head, and this run has asked Copilot fewer than
-   **3** times: `$S/request-copilot $R $N`, then wait. Exit 5 or 6 → carry
+   **3** times: `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>`, then wait. Exit 5 or 6 → carry
    on without it. Outside setup step 6, never request Copilot on a PR it has
    not reviewed: its reviews are billed, and the local review stands in.
    If `copilot.no_review` is set, Copilot's last run ended
