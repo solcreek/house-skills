@@ -15,8 +15,9 @@ our tools share: exit codes, flag names, JSON shapes, paths, state. The
 templates already do both. Your job is to keep it so while you replace the
 example commands with the real ones.
 
-`$S` is `${CLAUDE_SKILL_DIR}/scripts`. `$A` is
-`${CLAUDE_SKILL_DIR}/../audit/scripts`.
+Run one script per Bash call with its path and arguments written out: no
+shell variables, `$(…)`, loops or `;`/`&&` chains. A worktree-isolated
+session refuses a command it cannot prove stays inside the worktree.
 
 ## 1. Pick the stack
 
@@ -66,7 +67,7 @@ change is cheap:
 
 ## 3. Scaffold
 
-    $S/scaffold STACK DIR NAME
+    ${CLAUDE_SKILL_DIR}/scripts/scaffold STACK DIR NAME
 
 This copies the template, renames the placeholder to NAME, and adds the
 latest dependencies. It prints JSON with `dir`, `files`, `build` and `test`
@@ -127,12 +128,14 @@ and delete the rest (a tool with no state needs no `home` or `appendState`):
 Run `build` and `test` from step 3 in `dir`, then probe the top level and
 every command:
 
-    $A/probe -- BINARY
-    $A/probe -- BINARY COMMAND                 # add --skip unknown-command when
-                                               # COMMAND takes a free positional
-    $A/run-json -- BINARY describe
-    $A/run-json --expect-exit 0 --cwd FIXTURE --env NAME_HOME=$(mktemp -d) -- BINARY COMMAND … --json
-    $A/run-json --expect-exit 2 -- BINARY MUTATING … --json   # no --yes: refused, as JSON
+    ${CLAUDE_SKILL_DIR}/../audit/scripts/probe -- BINARY
+    # add --skip unknown-command when COMMAND takes a free positional
+    ${CLAUDE_SKILL_DIR}/../audit/scripts/probe -- BINARY COMMAND
+    ${CLAUDE_SKILL_DIR}/../audit/scripts/run-json -- BINARY describe
+    # HOME_DIR: an empty directory you made in its own call (mktemp -d)
+    ${CLAUDE_SKILL_DIR}/../audit/scripts/run-json --expect-exit 0 --cwd FIXTURE --env NAME_HOME=HOME_DIR -- BINARY COMMAND … --json
+    # no --yes: refused, as JSON
+    ${CLAUDE_SKILL_DIR}/../audit/scripts/run-json --expect-exit 2 -- BINARY MUTATING … --json
 
 Check the failures too: a missing input (`--expect-exit 1`), an unreadable
 part (`--expect-exit 3`), a held lock (`--expect-exit 4`). A command that

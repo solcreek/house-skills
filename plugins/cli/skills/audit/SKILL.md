@@ -14,7 +14,9 @@ it before step 3. A finding is a rubric id with evidence, never an
 impression. For our own tools, also check [the conventions](references/conventions.md)
 (exit codes, flag names, JSON shapes); a departure no rule covers is **taste**.
 
-`$S` below is `${CLAUDE_SKILL_DIR}/scripts`.
+Run one script per Bash call with its path and arguments written out: no
+shell variables, `$(…)`, loops or `;`/`&&` chains. A worktree-isolated
+session refuses a command it cannot prove stays inside the worktree.
 
 **Running the tool is the risk.** A tool that ignores `--help`, an unknown
 flag or an unknown subcommand performs its action instead, which might push,
@@ -74,9 +76,12 @@ finding: cite `file:line`. Then skip what would trigger it:
 
 ## 3. Probe
 
-    $S/probe --offline -- TOOL                          # top level
-    $S/probe --offline [--skip …] -- TOOL SUB [SUB2]    # each subcommand step 2 cleared
-    $S/run-json --offline -- TOOL SUB … --json          # read-only commands only
+    # top level
+    ${CLAUDE_SKILL_DIR}/scripts/probe --offline -- TOOL
+    # each subcommand step 2 cleared
+    ${CLAUDE_SKILL_DIR}/scripts/probe --offline [--skip …] -- TOOL SUB [SUB2]
+    # read-only commands only
+    ${CLAUDE_SKILL_DIR}/scripts/run-json --offline -- TOOL SUB … --json
 
 `run-json` runs an action, so the user is asked to approve it each time.
 Add `--lines` for a command documented to print NDJSON. On a non-zero exit
