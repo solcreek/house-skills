@@ -524,6 +524,11 @@ gito switch -q main
 echo dirty > "$co/x"
 checkout "local changes are refused" "$co" 3 '.action == "refused"'
 gito checkout -q -- x
+gito switch -q babysit-pr-7
+echo dirty > "$co/x"
+checkout "local changes are refused on the PR's own branch too" "$co" 3 '.action == "refused"'
+gito checkout -q -- x
+gito switch -q main
 
 echo "== review-range"
 rr="$root/plugins/dev/skills/babysit-pr/scripts/review-range"

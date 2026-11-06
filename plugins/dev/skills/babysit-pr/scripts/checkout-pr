@@ -28,14 +28,14 @@ local_name="babysit-pr-$number"
 say() { jq -nc --arg l "$1" --arg b "$branch" --arg a "$2" --arg w "${3:-}" \
   '{local: $l, branch: $b, action: $a} + (if $w == "" then {} else {worktree: $w} end)'; }
 
+if [ -n "$(git status --porcelain)" ]; then
+  echo '{"action": "refused", "why": "this worktree has local changes"}'
+  exit 3
+fi
 current=$(git symbolic-ref --quiet --short HEAD || true)
 if [ "$current" = "$branch" ] || [ "$current" = "$local_name" ]; then
   say "$current" here
   exit 0
-fi
-if [ -n "$(git status --porcelain)" ]; then
-  echo '{"action": "refused", "why": "this worktree has local changes"}'
-  exit 3
 fi
 
 top=$(git rev-parse --show-toplevel)
