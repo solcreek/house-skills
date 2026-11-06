@@ -49,7 +49,7 @@ does that job, and never a command of your own for it, nor a hand-built
 | `checkout` | Setup 3, in place of `gh pr checkout` |
 | `checks` | any read of check state outside `pr-state`/`wait-pr` (after a re-run, the final report). Never in place of those two: they carry the trust filter and the wake-up |
 | `ci-failures` | cycle step 2, in place of `gh run view --log-failed` |
-| `gate` | cycle step 4, after the cycle's commits: a failure is fixed like a failing test |
+| `gate` | cycle step 6, on the HEAD about to be pushed: a failure is fixed like a failing test |
 | `test` | wherever this skill runs "the affected tests"; `{since}` is the HEAD the cycle started from |
 | `reviewer` | cycle step 5, through `review-range` |
 
@@ -152,8 +152,6 @@ then push **once**.
 4. **Commit** each fix on its own (one finding, one commit, tests with it),
    in the repo's commit style, after running the affected tests.
    A fix that breaks tests gets reverted, and the item becomes Flagged.
-   If this cycle made commits and `gate` is declared, run it once they are
-   in; fix what it reports the same way.
 5. **Review your own commits before pushing.** If this cycle made commits —
    or the PR has had no review at all (`copilot.involved` false and
    `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
@@ -192,8 +190,13 @@ then push **once**.
    summary comment's `reviewed` marker records the exact HEAD the review saw —
    never a later one. Commits made after it (fixes for its findings) are
    reviewed in the next cycle, or before finishing (see "Settled and clean").
-6. **Push**: `git push origin HEAD:<branch>`. Never `--force`, never to the
-   base branch.
+6. **Push**: if this cycle made commits and `gate` is declared, run it on
+   the HEAD you are about to push, after every other commit of the cycle;
+   fix what it reports one commit each, and run it again whenever that
+   changes HEAD. A failure you cannot fix is a person's call: Flag it and
+   push nothing. Then
+   `git push origin HEAD:<branch>`. Never `--force`, never to the base
+   branch.
 7. **Answer.**
    - Thread, Fixed → `${CLAUDE_SKILL_DIR}/scripts/thread reply <id>` with `Fixed in <sha> — <what changed>`.
      Leave it open; it is resolved once checks are green on a head containing
