@@ -867,6 +867,15 @@ a2
 == test / run
 b1
 b2" 2
+jobs_json '9:ci:failure'
+printf '%s\n' \
+  $'ci\tRun bin/ci\t\xef\xbb\xbf2026-10-09T20:05:48.9224492Z ##[group]Run bin/ci' \
+  $'ci\tRun bin/ci\t2026-10-09T20:05:48.9224935Z ^[[36;1mbin/ci^[[0m' \
+  > "$tmp/ci.log.9"
+logged "as gh prints a real log: the byte-order mark and literal ^[ colour codes go too" 0 \
+"== ci / Run bin/ci
+##[group]Run bin/ci
+bin/ci"
 jobs_json '6:big:failure'
 awk 'BEGIN { for (i = 1; i <= 5000; i++) printf "big\tstep\t2026-10-14T02:46:04Z line %d\n", i }' > "$tmp/ci.log.6"
 logged "a long job is cut to its last lines" 0 \

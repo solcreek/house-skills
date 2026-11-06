@@ -38,11 +38,13 @@ for id in $ids; do
   shown=$((shown + 1))
   # gh prints JOB<TAB>STEP<TAB>TIMESTAMP TEXT per line. Only the last keep
   # lines are printed, so only they are kept: memory follows the budget.
-  awk -F '\t' -v keep="$lines" '
+  LC_ALL=C awk -F '\t' -v keep="$lines" '
     {
       text = $0; sub(/^[^\t]*\t[^\t]*\t/, "", text)
+      # A log can open with a byte-order mark, and gh prints ESC as a literal ^[.
+      sub(/^\357\273\277/, "", text)
       sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z ?/, "", text)
-      gsub(/\033\[[0-9;]*[A-Za-z]/, "", text)
+      gsub(/(\033|\^\[)\[[0-9;]*[A-Za-z]/, "", text)
       job = $1; n = NR
       steps[n] = $2; texts[n] = text
       if (n > keep) { delete steps[n - keep]; delete texts[n - keep] }
