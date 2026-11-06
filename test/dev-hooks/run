@@ -3,6 +3,13 @@
 # suggestion, and that only a well-formed PR URL reaches Claude. No network.
 set -euo pipefail
 
+# The hook reads BABYSIT_* settings, and git (through repo-commands) reads
+# GIT_*. Every case starts from none of them, so the caller's own settings
+# never decide a result; a case that needs one passes it to check.
+for v in $(compgen -e); do
+  case $v in BABYSIT_* | GIT_*) unset "$v" ;; esac
+done
+
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 hook="$root/plugins/dev/hooks/suggest-babysit"
 URL=https://github.com/solcreek/x/pull/7
@@ -66,20 +73,17 @@ check "an opener named by its path"           "$URL" "bin/mk pr open" "$URL" "BA
 check "gh still works beside openers"         "$URL" "gh pr create --fill" "$URL" "$O"
 check "an empty opener list changes nothing"  "$URL" "gh pr create --fill" "$URL" "BABYSIT_PR_OPENERS= , "
 
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
 repo="$tmp/repo"
 git init -q -b main "$repo"
 printf '%s\n' '# Agents' '' '```babysit-pr-pr-open' 'bin/mk pr open --json' '```' > "$repo/AGENTS.md"
 mkdir "$repo/sub"
-U="-u BABYSIT_PR_OPENERS"
-CWD="$repo" check "a declared pr-open suggests"               "$URL" "bin/mk pr open --fill" "$URL" $U
-CWD="$repo" check "a declared pr-open matches by name"        "$URL" "mk pr open" "$URL" $U
-CWD="$repo" check "a declared pr-open called by another path" "$URL" "./bin/mk pr open" "$URL" $U
-CWD="$repo/sub" check "a declared pr-open from a subdirectory" "$URL" "../bin/mk pr open" "$URL" $U
-CWD="$repo" check "the declared opener stops at its options"   ""     "bin/mk pr view" "$URL" $U
-CWD="$repo" check "gh still works beside a declared opener"    "$URL" "gh pr create --fill" "$URL" $U
-check "no declaration, the wrapper is ignored"                 ""     "bin/mk pr open" "$URL" $U
-CWD="$tmp/missing" check "a cwd that is gone changes nothing"  "$URL" "gh pr create --fill" "$URL" $U
+CWD="$repo" check "a declared pr-open suggests"               "$URL" "bin/mk pr open --fill" "$URL"
+CWD="$repo" check "a declared pr-open matches by name"        "$URL" "mk pr open" "$URL"
+CWD="$repo" check "a declared pr-open called by another path" "$URL" "./bin/mk pr open" "$URL"
+CWD="$repo/sub" check "a declared pr-open from a subdirectory" "$URL" "../bin/mk pr open" "$URL"
+CWD="$repo" check "the declared opener stops at its options"   ""     "bin/mk pr view" "$URL"
+CWD="$repo" check "gh still works beside a declared opener"    "$URL" "gh pr create --fill" "$URL"
+CWD="$tmp/missing" check "a cwd that is gone changes nothing"  "$URL" "gh pr create --fill" "$URL"
 
 code=0
 echo 'not json' | "$hook" >/dev/null 2>&1 || code=$?
@@ -87,4 +91,11 @@ if [ "$code" -eq 0 ]; then echo "ok   bad payload exits 0"; pass=$((pass + 1));
 else echo "FAIL bad payload exits $code"; fail=$((fail + 1)); fi
 
 echo "$pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[ "$fail" -eq 0 ] || exit 1
+
+# Run every case again from a caller whose settings would each flip a result,
+# so a case that comes to depend on the caller's environment fails here.
+[ -z "${DEV_HOOKS_HOSTILE_RUN:-}" ] || exit 0
+echo "==> again, from a caller with BABYSIT_* and GIT_* set"
+DEV_HOOKS_HOSTILE_RUN=1 BABYSIT_SUGGEST=never BABYSIT_PR_OPENERS="mk pr open,maneki pr open" \
+  GIT_DIR="$tmp/missing" "$0"
