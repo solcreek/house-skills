@@ -478,6 +478,11 @@ a
 b
 $FENCE"
 declared "a block of two lines is broken" 0 '.checks.command == null and (.checks.why | test("exactly one command line"))' main 7 feat
+mkdir -p "$caps/pkg"
+rc=0; out=$(cd "$caps/pkg" && "$rc_" main 7 feat 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && jq -e '.checks.source == "REVIEW.md"' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   run from a subdirectory, the root's declarations are still found"; pass=$((pass + 1))
+else echo "FAIL from a subdirectory: exit $rc: $out"; fail=$((fail + 1)); fi
 declared "a missing origin/BASE is a failure to look" 1 - nope 7 feat
 declared "NUMBER must be a number" 2 - main 'x;y' feat
 

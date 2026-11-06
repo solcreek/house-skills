@@ -95,7 +95,7 @@ for file in REVIEW.md AGENTS.md CLAUDE.md; do
   else
     # Absent is "nothing here"; present but unreadable (a partial clone missing
     # the blob) is "could not look", never "nothing declared".
-    listed=$(git ls-tree --name-only "$ref" -- "$file") \
+    listed=$(git ls-tree --full-tree --name-only "$ref" -- "$file") \
       || { echo "repo-commands: could not list $where" >&2; exit 1; }
     [ -n "$listed" ] || continue
     text=$(git show "$ref:$file") \
