@@ -77,7 +77,7 @@ bin/mk pr status {number} --wait --json
 |---|---|---|---|
 | `checkout` | gets onto the PR's head branch | `{number}`, `{branch}` | `gh pr checkout` |
 | `checks` | prints the PR's checks, waiting while any runs | `{number}` | `pr-state` and `gh` |
-| `ci-failures` | prints the failed checks' error lines | `{number}` | `gh run view --log-failed` |
+| `ci-failures` | prints the failed checks' error lines | `{number}` | `gh run view --log-failed`, the last lines of each failed job |
 | `gate` | runs the pre-push gates (lint, types, ...) on HEAD | `{base}` | nothing |
 | `test` | runs the tests the change since `{since}` affects | `{since}`, `{base}` | the narrowest tests it can find in the docs |
 | `reviewer` | reviews the commits after `{since}`; exits 0 when the review ran to completion, whatever it found | `{since}` (required), `{base}` | a review subagent |

@@ -48,7 +48,7 @@ does that job, and never a command of your own for it, nor a hand-built
 |---|---|
 | `checkout` | Setup 3, in place of `gh pr checkout` |
 | `checks` | any read of check state outside `pr-state`/`wait-pr` (after a re-run, the final report). Never in place of those two: they carry the trust filter and the wake-up |
-| `ci-failures` | cycle step 2, in place of `gh run view --log-failed` |
+| `ci-failures` | cycle step 2, in place of `ci-log` |
 | `gate` | cycle step 6, on the HEAD about to be pushed: a failure is fixed like a failing test |
 | `test` | wherever this skill runs "the affected tests"; `{since}` is the HEAD the cycle started from |
 | `reviewer` | cycle step 5, through `review-range` |
@@ -89,14 +89,15 @@ once, then stop.
 2. **Read state** with `${CLAUDE_SKILL_DIR}/scripts/pr-state <owner/repo> <number>`. Not `OPEN` → stop.
    Then `git fetch origin <base>` and read the repository commands (above).
 3. **Get onto the head** with `${CLAUDE_SKILL_DIR}/scripts/checkout-pr <number> <branch>`.
-   Exit 0 → you are on its `local` branch: `<branch>` itself, or
-   `babysit-pr-<number>` when another worktree holds `<branch>`
-   (`action: "elsewhere"`). Exit 5 → run the `checkout` command, or
+   It fetches the PR's branch and fast-forwards to it. Exit 0 → you are on
+   its `local` branch: `<branch>` itself, or `babysit-pr-<number>` when
+   another worktree holds `<branch>` (`action: "elsewhere"`); `sync: "ahead"`
+   means an earlier run left commits it never pushed: review and push them
+   with this cycle's. Exit 5 → run the `checkout` command, or
    `gh pr checkout <number>`, then `checkout-pr` once more (5 again → stop).
-   Exit 3 (local changes) or 1 → stop. Then `git fetch origin` and
-   `git merge --ff-only origin/<branch>` if behind; if the local branch has
-   diverged from the PR's, stop. Every push names the PR's branch, so a
-   differently named local branch pushes the same way.
+   Exit 3 (local changes, or the local branch has diverged from the PR's) or
+   1 → stop. Every push names the PR's branch, so a differently named local
+   branch pushes the same way.
 4. **Learn the repo.** For anything the repository commands do not declare,
    from CLAUDE.md / AGENTS.md / README / package scripts / Makefile /
    Cargo.toml, note the narrowest build, lint and test commands; and the
@@ -127,8 +128,9 @@ then push **once**.
    no re-run. Handle its `alerts` and the code-scanning bot's threads in step
    3; the check passes on the push whose analysis no longer reports them. For
    every other check, read the failure with the `ci-failures` command, or
-   `gh run view <run_id> --log-failed | tail -n 200` (narrow with `grep` if
-   long). Then:
+   `${CLAUDE_SKILL_DIR}/scripts/ci-log <owner/repo> <run_id>`: the last
+   lines of each failed job. Its exit 3 (no failed step) or 1 (the log
+   cannot be read) leaves nothing to fix: judge the check by its `url`. Then:
    - Caused by this PR → fix it.
    - Flaky or infrastructure (runner lost, network, registry timeout, a test
      the diff cannot reach) → `gh run rerun <run_id> --failed`, **once per
@@ -155,10 +157,11 @@ then push **once**.
 5. **Review your own commits before pushing.** If this cycle made commits —
    or the PR has had no review at all (`copilot.involved` false and
    `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
-   `reviewed_sha`, else `copilot.reviewed_sha`, else
-   `git merge-base origin/<base> HEAD`. One call says what to review and who
-   reviews it: `${CLAUDE_SKILL_DIR}/scripts/review-range <base> <since>` prints
-   `{since, segments, merges, reviewer}`. It splits the range at merges of the
+   `reviewed_sha`, else `copilot.reviewed_sha`, else the merge base with the
+   base branch. One call says what to review and who reviews it:
+   `${CLAUDE_SKILL_DIR}/scripts/review-range <base> <since>` prints
+   `{since, segments, merges, reviewer}`; with neither sha, leave `<since>`
+   out and it uses the merge base. It splits the range at merges of the
    base, which would otherwise put everything the base gained under review.
    - Review its `since..HEAD` with its `reviewer`. `reviewer: null` → `since`
      is HEAD (the merge is the last commit) and nothing is left: skip it.
@@ -183,7 +186,8 @@ then push **once**.
      when the merge resolved itself: read it yourself, as a reviewer would.
    - Exit 1 → `git fetch origin <base>` and ask once more; failing again,
      review `<since>..HEAD` whole with the reviewer
-     `${CLAUDE_SKILL_DIR}/scripts/local-reviewer <base> <since>` names (exit 0: its `command`; any other
+     `${CLAUDE_SKILL_DIR}/scripts/local-reviewer <base> <since>` names
+     (`<since>` left out the same way; exit 0: its `command`; any other
      exit: the subagent), and say why in the final report.
 
    Triage the findings like any other; fix and commit what you adopt. The
@@ -238,9 +242,9 @@ then push **once**.
    marker with nothing to carry, but always keep the tag line. The markers are
    the loop's only memory across cycles and machines: a review or comment id in
    `handled` is never shown as work again.
-9. **Wait.** Read the head with `git rev-parse HEAD` in its own call, then run
-   `${CLAUDE_SKILL_DIR}/scripts/wait-pr <owner/repo> <number> <full head sha>`
-   with that sha written out and the Bash tool's `run_in_background: true`, and nothing else until it wakes you. It exits on
+9. **Wait.** Run `${CLAUDE_SKILL_DIR}/scripts/wait-pr <owner/repo> <number>`
+   with the Bash tool's `run_in_background: true`, and nothing else until it
+   wakes you. It waits on this checkout's HEAD, the head just pushed. It exits on
    `moved`, `closed`, `work` or `settled`; exit 1 is a timeout (stop, report what
    was pending); exit 3 passes through a refusal or repeated failure (stop).
    Never poll with sleep or scheduled wake-ups.
@@ -255,7 +259,7 @@ When `work == 0` and `settled`:
    green on this head, and the fix is in it).
 3. **Copilot confirmation.** If `copilot.involved` and `copilot.stale`, your
    local review covered the head, and this run has asked Copilot fewer than
-   **3** times: `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>`, then wait — unless it exits 5 or
+   **3** times: `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>`, then wait (cycle step 9) — unless it exits 5 or
    prints `"action": "disabled"`: then carry on without it. Outside setup step 6, never request Copilot on a PR it has
    not reviewed: its reviews are billed, and the local review stands in.
    If `copilot.no_review` is set, Copilot's last run ended
