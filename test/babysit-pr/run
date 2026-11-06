@@ -618,9 +618,11 @@ else echo "FAIL COMMIT must be a full sha: exit $rc: $out"; fail=$((fail + 1)); 
 unset FAKE_RUNS FAKE_LOG
 
 echo "== request-copilot"
-rc=0; out=$(BABYSIT_COPILOT=never "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?
-if [ "$rc" -eq 6 ]; then echo "ok   BABYSIT_COPILOT=never refuses before any API call"; pass=$((pass + 1))
-else echo "FAIL BABYSIT_COPILOT=never: exit $rc: $out"; fail=$((fail + 1)); fi
+rc=0; : > "$FAKE_CALLS"
+out=$(BABYSIT_COPILOT=never PATH="$tmp/bin:$PATH" "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && [ ! -s "$FAKE_CALLS" ] && jq -e '. == {action: "disabled", pending: null}' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   BABYSIT_COPILOT=never is exit 0, action disabled, before any API call"; pass=$((pass + 1))
+else echo "FAIL BABYSIT_COPILOT=never: exit $rc: $out; calls: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
 rc=0; out=$(BABYSIT_COPILOT=always "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?
 if [ "$rc" -eq 2 ]; then echo "ok   an unknown BABYSIT_COPILOT value is a usage error"; pass=$((pass + 1))
 else echo "FAIL BABYSIT_COPILOT=always: exit $rc: $out"; fail=$((fail + 1)); fi

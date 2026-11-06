@@ -77,7 +77,8 @@ once, then stop.
    asked, and no ruleset on the base branch asks it by itself), run
    `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>` now so it reviews alongside the first cycle; it
    counts toward the 3 below. Exit 5 (Copilot not available on this repo) or
-   6 (`BABYSIT_COPILOT=never`) → carry on with the local review only. If
+   `"action": "disabled"` (`BABYSIT_COPILOT=never`) → carry on with the local
+   review only. If
    `copilot.auto` is null, the rules could not be read: do not request, and
    say so in the final report.
 
@@ -217,8 +218,8 @@ When `work == 0` and `settled`:
    green on this head, and the fix is in it).
 3. **Copilot confirmation.** If `copilot.involved` and `copilot.stale`, your
    local review covered the head, and this run has asked Copilot fewer than
-   **3** times: `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>`, then wait. Exit 5 or 6 → carry
-   on without it. Outside setup step 6, never request Copilot on a PR it has
+   **3** times: `${CLAUDE_SKILL_DIR}/scripts/request-copilot <owner/repo> <number>`, then wait — unless it exits 5 or
+   prints `"action": "disabled"`: then carry on without it. Outside setup step 6, never request Copilot on a PR it has
    not reviewed: its reviews are billed, and the local review stands in.
    If `copilot.no_review` is set, Copilot's last run ended
    without a review: say so in the summary (with `copilot.run_url`); that

@@ -2,7 +2,9 @@
 # request-copilot OWNER/REPO NUMBER
 #
 # Asks Copilot to review the PR's current head, at most once per pending
-# request. Prints {"action": "requested"|"skipped", "pending": N}.
+# request. Prints {"action": "requested"|"skipped", "pending": N}, or
+# {"action": "disabled", "pending": null} without asking when
+# BABYSIT_COPILOT=never.
 #
 # REST, not `gh pr edit --add-reviewer`: that command resolves the PR through a
 # broad GraphQL query whose deprecated fields have broken it before. And a 2xx
@@ -11,11 +13,13 @@
 # pr-state shows it pending.
 #
 # BABYSIT_COPILOT=never turns requests off (reviews are billed); Copilot
-# still reviews where a repo ruleset asks it to.
+# still reviews where a repo ruleset asks it to. That opt-out is the operator's
+# choice, not a failure, so it exits 0: agent harnesses log any non-zero exit
+# as an error.
 #
-# Exit 0 on success, 5 when the request was accepted but never showed up
-# (Copilot is unavailable here), 6 when BABYSIT_COPILOT=never, 1 on any other
-# failure, 2 usage.
+# Exit 0 on success or when disabled, 5 when the request was accepted but
+# never showed up (Copilot is unavailable here), 1 on any other failure,
+# 2 usage.
 set -euo pipefail
 
 usage="usage: request-copilot OWNER/REPO NUMBER"
@@ -26,7 +30,7 @@ attempts=${BABYSIT_CONFIRM_ATTEMPTS:-6}
 
 case ${BABYSIT_COPILOT:-} in
   "") ;;
-  never) echo "request-copilot: BABYSIT_COPILOT=never; not requesting Copilot" >&2; exit 6 ;;
+  never) jq -nc '{action: "disabled", pending: null}'; exit 0 ;;
   *) echo "request-copilot: BABYSIT_COPILOT must be empty or 'never'" >&2; exit 2 ;;
 esac
 
