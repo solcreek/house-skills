@@ -39,6 +39,8 @@ awk -F '\t' -v keep="$lines" '
     if (!(job in count)) order[++jobs] = job
     n = ++count[job]
     steps[job, n] = step; texts[job, n] = text
+    # Only the last keep lines of a job are printed: memory stays at that, not the log.
+    if (n > keep) { delete steps[job, n - keep]; delete texts[job, n - keep] }
   }
   END {
     for (k = 1; k <= jobs; k++) {

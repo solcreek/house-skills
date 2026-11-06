@@ -843,6 +843,12 @@ third
 
 == lint / run lint
 only"
+awk 'BEGIN { for (i = 1; i <= 5000; i++) printf "big\tstep\t2026-10-14T02:46:04Z line %d\n", i }' > "$tmp/ci.log"
+logged "a long job is cut to its last lines" 0 \
+"(4998 earlier lines of big left out)
+== big / step
+line 4999
+line 5000" 2
 : > "$tmp/ci.log"
 logged "a run with no failed step is exit 3, not an empty log" 3 '{"run": 9, "log": null}'
 unset FAKE_LOG
