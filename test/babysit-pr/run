@@ -562,6 +562,11 @@ if [ "$(gito rev-parse HEAD)" = "$AHEAD" ]; then
   echo "ok   a refused divergence leaves the local branch as it was"; pass=$((pass + 1))
 else echo "FAIL the divergence moved HEAD"; fail=$((fail + 1)); fi
 gito switch -q main
+checkout "a diverged babysit-pr-7 left by an earlier run is refused from another branch too" "$co" 3 \
+  '.action == "refused" and (.why | test("babysit-pr-7 has diverged"))'
+if [ "$(gito symbolic-ref --short HEAD)" = main ]; then
+  echo "ok   that refusal comes before the switch: the checkout stays on main"; pass=$((pass + 1))
+else echo "FAIL the refusal switched to $(gito symbolic-ref --short HEAD)"; fail=$((fail + 1)); fi
 
 echo "== review-range"
 rr="$root/plugins/dev/skills/babysit-pr/scripts/review-range"
