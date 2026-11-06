@@ -378,7 +378,7 @@ $FENCE
 $FENCE""babysit-pr-reviewer
 bin/other {since}
 $FENCE"
-reviewer_fails "two declarations are refused" 4 "declares 2 reviewers"
+reviewer_fails "two declarations are refused" 4 "declares 2 babysit-pr-reviewer blocks"
 on_base REVIEW.md "$FENCE""babysit-pr-reviewer"$'\r'"
 bin/review {since}"$'\r'"
 $FENCE"$'\r'
@@ -395,6 +395,145 @@ mv "$tmp/blob" "$repo/.git/objects/${blob:0:2}/${blob:2}"
 rc=0; out=$(cd "$repo" && "$lr" main 'HEAD;rm' 2>&1) || rc=$?
 if [ "$rc" -eq 2 ]; then echo "ok   SINCE must be a sha"; pass=$((pass + 1))
 else echo "FAIL SINCE must be a sha: exit $rc: $out"; fail=$((fail + 1)); fi
+
+echo "== repo-commands"
+rc_="$root/plugins/dev/skills/babysit-pr/scripts/repo-commands"
+caps="$tmp/caps"
+git init -q -b main "$caps"
+gitc() { git -C "$caps" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+caps_base() { # caps_base FILE TEXT — commits FILE on main and publishes it as origin/main
+  printf '%s\n' "$2" > "$caps/$1"
+  gitc add -A && gitc commit -qm "$1" && gitc update-ref refs/remotes/origin/main HEAD
+}
+declared() { # declared NAME EXIT ASSERTION ARGS... — runs repo-commands ARGS; ASSERTION "-" checks only EXIT
+  local out rc=0
+  out=$(cd "$caps" && "$rc_" "${@:4}" 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && { [ "$3" = - ] || jq -e "$3" <<<"$out" >/dev/null 2>&1; }; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $2: $out"; fail=$((fail + 1))
+  fi
+}
+caps_base README.md "# x"
+declared "nothing declared: exit 3, every capability null, so every step stays as it was" 3 \
+  '. == {checkout: null, checks: null, "ci-failures": null, gate: null, reviewer: null, test: null, "pr-open": null}' main 7 feat
+caps_base AGENTS.md "# Agents
+
+$FENCE""babysit-pr-checkout
+bin/mk pr checkout {number} --branch {branch}
+$FENCE
+
+$FENCE""babysit-pr-checks
+bin/mk pr status {number} --wait --json
+$FENCE
+
+$FENCE""babysit-pr-ci-failures
+bin/mk ci failures {number} --json
+$FENCE
+
+$FENCE""babysit-pr-gate
+bin/mk review --base {base}
+$FENCE
+
+$FENCE""babysit-pr-test
+bin/mk test affected --since {since}
+$FENCE
+
+$FENCE""babysit-pr-reviewer
+bin/mk review ai --base {since} --format text
+$FENCE
+
+$FENCE""babysit-pr-pr-open
+bin/mk pr open --json
+$FENCE"
+declared "every capability declared comes back as its command, placeholders filled but {since}" 0 \
+  '. == {checkout: {command: "bin/mk pr checkout 7 --branch feat", source: "AGENTS.md"},
+         checks: {command: "bin/mk pr status 7 --wait --json", source: "AGENTS.md"},
+         "ci-failures": {command: "bin/mk ci failures 7 --json", source: "AGENTS.md"},
+         gate: {command: "bin/mk review --base main", source: "AGENTS.md"},
+         test: {command: "bin/mk test affected --since {since}", source: "AGENTS.md"},
+         reviewer: {command: "bin/mk review ai --base {since} --format text", source: "AGENTS.md"},
+         "pr-open": {command: "bin/mk pr open --json", source: "AGENTS.md"}}' main 7 feat
+declared "a branch with shell metacharacters is quoted" 0 \
+  '.checkout.command == "bin/mk pr checkout 7 --branch '"'"'a;$(b)'"'"'"' main 7 'a;$(b)'
+declared "without NUMBER and BRANCH their placeholders stay" 0 \
+  '.checks.command == "bin/mk pr status {number} --wait --json" and .gate.command == "bin/mk review --base main"' main
+caps_base REVIEW.md "$FENCE""babysit-pr-checks
+bin/checks
+$FENCE
+
+$FENCE""babysit-pr-gate
+bin/gate {since}
+$FENCE"
+declared "per capability, the first file declaring it wins; the rest still come from later files" 0 \
+  '.checks == {command: "bin/checks", source: "REVIEW.md"} and .["ci-failures"].source == "AGENTS.md"' main 7 feat
+declared "a placeholder the capability does not take breaks only that declaration" 0 \
+  '.gate.command == null and (.gate.why | test("uses [{]since[}]")) and .checks.command == "bin/checks"' main 7 feat
+printf '%s\n' "$FENCE""babysit-pr-checks" "make evil" "$FENCE" > "$caps/REVIEW.md"
+gitc commit -qam "the PR changes its commands"
+declared "the checkout cannot change a command: origin/BASE decides" 0 '.checks.command == "bin/checks"' main 7 feat
+declared "--worktree reads the checkout, for the suggestion hook" 0 '.checks.command == "make evil"' --worktree
+caps_base REVIEW.md "$FENCE""babysit-pr-checks
+a
+b
+$FENCE"
+declared "a block of two lines is broken" 0 '.checks.command == null and (.checks.why | test("exactly one command line"))' main 7 feat
+mkdir -p "$caps/pkg"
+rc=0; out=$(cd "$caps/pkg" && "$rc_" main 7 feat 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && jq -e '.checks.source == "REVIEW.md"' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   run from a subdirectory, the root's declarations are still found"; pass=$((pass + 1))
+else echo "FAIL from a subdirectory: exit $rc: $out"; fail=$((fail + 1)); fi
+declared "a missing origin/BASE is a failure to look" 1 - nope 7 feat
+declared "NUMBER must be a number" 2 - main 'x;y' feat
+
+echo "== checkout-pr"
+cp_="$root/plugins/dev/skills/babysit-pr/scripts/checkout-pr"
+origin="$tmp/origin.git"
+git init -q --bare -b main "$origin"
+co="$tmp/co"
+git clone -q "$origin" "$co" 2>/dev/null
+gito() { git -C "$co" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+echo x > "$co/x" && gito add x && gito commit -qm x && gito push -q origin main
+gito switch -q -c feat && echo y > "$co/y" && gito add y && gito commit -qm y && gito push -q origin feat
+FEAT=$(gito rev-parse HEAD)
+gito switch -q main
+checkout() { # checkout NAME DIR EXIT ASSERTION — runs checkout-pr 7 feat in DIR
+  local out rc=0
+  out=$(cd "$2" && "$cp_" 7 feat 2>&1) || rc=$?
+  if [ "$rc" -eq "$3" ] && jq -e "$4" <<<"$out" >/dev/null 2>&1; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $3: $out"; fail=$((fail + 1))
+  fi
+}
+checkout "nothing holds the branch: exit 5, check it out the usual way" "$co" 5 '.action == "checkout"'
+gito switch -q feat
+checkout "already on the branch: here" "$co" 0 '. == {local: "feat", branch: "feat", action: "here"}'
+gito switch -q main
+gito worktree add -q "$tmp/held" feat
+checkout "another worktree holds the branch: a local branch of another name, at the PR's head" "$co" 0 \
+  '. == {local: "babysit-pr-7", branch: "feat", action: "elsewhere", worktree: "'"$(cd "$tmp/held" && pwd -P)"'"}'
+if [ "$(gito symbolic-ref --short HEAD)" = babysit-pr-7 ] && [ "$(gito rev-parse HEAD)" = "$FEAT" ] \
+  && [ -z "$(gito config branch.babysit-pr-7.merge || true)" ]; then
+  echo "ok   now on babysit-pr-7 at origin/feat, tracking nothing a bare push could hit"; pass=$((pass + 1))
+else echo "FAIL not on babysit-pr-7 at $FEAT: $(gito rev-parse --abbrev-ref HEAD) $(gito rev-parse HEAD)"; fail=$((fail + 1)); fi
+echo z > "$co/z" && gito add z && gito commit -qm z
+gito push -q origin HEAD:feat
+if [ "$(git -C "$origin" rev-parse feat)" = "$(gito rev-parse HEAD)" ]; then
+  echo "ok   git push origin HEAD:feat from babysit-pr-7 updates the PR's branch"; pass=$((pass + 1))
+else echo "FAIL the push did not reach feat"; fail=$((fail + 1)); fi
+checkout "on babysit-pr-7 again: here" "$co" 0 '. == {local: "babysit-pr-7", branch: "feat", action: "here"}'
+gito switch -q main
+checkout "a babysit-pr-7 left by an earlier run is reused" "$co" 0 '.local == "babysit-pr-7" and .action == "elsewhere"'
+gito switch -q main
+echo dirty > "$co/x"
+checkout "local changes are refused" "$co" 3 '.action == "refused"'
+gito checkout -q -- x
+gito switch -q babysit-pr-7
+echo dirty > "$co/x"
+checkout "local changes are refused on the PR's own branch too" "$co" 3 '.action == "refused"'
+gito checkout -q -- x
+gito switch -q main
 
 echo "== review-range"
 rr="$root/plugins/dev/skills/babysit-pr/scripts/review-range"

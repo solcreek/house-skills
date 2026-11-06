@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# repo-commands BASE [NUMBER BRANCH]
+# repo-commands --worktree
+#
+# The commands a repository declares for babysit-pr's capabilities, so the
+# skill runs the repository's own tools instead of inferring them from prose.
+# A repository declares a capability in REVIEW.md, AGENTS.md or CLAUDE.md (the
+# first of those that declares it) with a fenced block named after it:
+#
+#   ```babysit-pr-checks
+#   bin/mk pr status {number} --wait --json
+#   ```
+#
+# One command line per block, one block per capability per file. Capabilities:
+#
+#   checkout     get onto the PR's head branch            {number} {branch}
+#   checks       the PR's checks, waiting while any runs  {number}
+#   ci-failures  the failed checks' error lines           {number}
+#   gate         the pre-push gates (lint, types, ...)    {base}
+#   reviewer     review the commits after {since}         {since} (required)
+#   test         run the tests the change affects         {since} {base}
+#   pr-open      open a pull request (the dev plugin's suggestion hook)
+#
+# {number}, {branch} and {base} are filled in here when given, shell-quoted
+# unless plain; {since} is left for the step that knows it. Using one a
+# capability does not take breaks the declaration.
+#
+# Declarations are read from origin/BASE, never from the checkout, so the pull
+# request under review cannot change which command runs (the command still runs
+# the PR's own code, like its build and tests). --worktree reads the checkout's
+# files instead, for the suggestion hook, which runs nothing it reads.
+#
+# Prints one JSON object with every capability as a key:
+#   null                                        not declared
+#   {"command": "...", "source": "AGENTS.md"}   run this
+#   {"command": null, "source": ..., "why": ...} declared, but broken
+# Exit codes: 0 something declared · 3 nothing declared · 1 could not look
+# (origin/BASE missing, a file on it unreadable, jq missing; message on
+# stderr) · 2 usage
+set -euo pipefail
+
+usage="usage: repo-commands BASE [NUMBER BRANCH] | repo-commands --worktree"
+base=${1:?$usage}
+number=${2:-}
+branch=${3:-}
+command -v jq >/dev/null || { echo "repo-commands needs jq" >&2; exit 1; }
+[ -z "$number" ] || [[ "$number" =~ ^[0-9]+$ ]] || { echo "repo-commands: NUMBER must be a PR number" >&2; exit 2; }
+
+capabilities="checkout checks ci-failures gate reviewer test pr-open"
+
+if [ "$base" = --worktree ]; then
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "repo-commands: not in a git checkout" >&2; exit 1; }
+  where="the checkout"
+else
+  ref="refs/remotes/origin/$base"
+  git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
+    || { echo "repo-commands: origin/$base not found; fetch it first" >&2; exit 1; }
+  where="origin/$base"
+fi
+
+# Lists the babysit-pr blocks in a Markdown file on stdin: "O<TAB>name" once per
+# block, then "L<TAB>name<TAB>line" for each non-blank line of each name's
+# first block. Only a top-level fence counts, so an example nested in a longer
+# fence (documentation of this very format) is not a declaration. CommonMark
+# rules: a fence is 3+ backticks or tildes indented at most 3 spaces, closed by
+# a run of the same character at least as long with nothing after it; an
+# unclosed fence runs to the end.
+declarations() {
+  awk '
+    function run(s, c,   n) { n = 0; while (substr(s, n + 1, 1) == c) n++; return n }
+    { sub(/\r$/, ""); line = $0; sub(/^ ? ? ?/, "", line) }
+    !open {
+      c = substr(line, 1, 1)
+      if ((c != "`" && c != "~") || run(line, c) < 3) next
+      n = run(line, c); info = substr(line, n + 1)
+      if (c == "`" && index(info, "`")) next
+      gsub(/^[ \t]+|[ \t]+$/, "", info)
+      open = 1; fc = c; fl = n; take = 0
+      if (info ~ /^babysit-pr-[a-z][a-z-]*$/) {
+        name = substr(info, 12); print "O\t" name
+        take = (seen[name]++ == 0)
+      }
+      next
+    }
+    substr(line, 1, 1) == fc && run(line, fc) >= fl && substr(line, run(line, fc) + 1) ~ /^[ \t]*$/ { open = 0; next }
+    take && NF { sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line); print "L\t" name "\t" line }'
+}
+
+result='{}'
+found=false
+for file in REVIEW.md AGENTS.md CLAUDE.md; do
+  if [ "$base" = --worktree ]; then
+    [ -f "$top/$file" ] || continue
+    text=$(cat "$top/$file") || { echo "repo-commands: could not read $file in the checkout" >&2; exit 1; }
+  else
+    # Absent is "nothing here"; present but unreadable (a partial clone missing
+    # the blob) is "could not look", never "nothing declared".
+    listed=$(git ls-tree --full-tree --name-only "$ref" -- "$file") \
+      || { echo "repo-commands: could not list $where" >&2; exit 1; }
+    [ -n "$listed" ] || continue
+    text=$(git show "$ref:$file") \
+      || { echo "repo-commands: could not read $file on $where" >&2; exit 1; }
+  fi
+  blocks=$(declarations <<<"$text")
+  [ -n "$blocks" ] || continue
+  for cap in $capabilities; do
+    [ "$(jq --arg c "$cap" 'has($c)' <<<"$result")" = false ] || continue
+    n=$(grep -c "^O	$cap\$" <<<"$blocks" || true)
+    [ "$n" -gt 0 ] || continue
+    found=true
+    why=""
+    lines=$(grep "^L	$cap	" <<<"$blocks" | cut -f 3- || true)
+    if [ "$n" -gt 1 ]; then
+      why="$file on $where declares $n babysit-pr-$cap blocks; it must declare one"
+    elif [ -z "$lines" ] || [ "$(wc -l <<<"$lines")" -ne 1 ]; then
+      why="the babysit-pr-$cap block in $file on $where must hold exactly one command line"
+    elif [ "$cap" = reviewer ] && [[ "$lines" != *"{since}"* ]]; then
+      why="the reviewer in $file on $where must take {since}, or it reviews more than the new commits"
+    else
+      case $cap in
+        checkout) allowed="number branch" ;;
+        checks | ci-failures) allowed="number" ;;
+        gate) allowed="base" ;;
+        reviewer | test) allowed="since base" ;;
+        *) allowed="" ;;
+      esac
+      for p in number branch base since; do
+        [[ "$lines" != *"{$p}"* || " $allowed " == *" $p "* ]] \
+          || why="the babysit-pr-$cap command in $file on $where uses {$p}; it takes only: ${allowed:-no placeholders}"
+      done
+    fi
+    if [ -n "$why" ]; then
+      result=$(jq -c --arg c "$cap" --arg s "$file" --arg w "$why" '.[$c] = {command: null, source: $s, why: $w}' <<<"$result")
+      continue
+    fi
+    [ "$base" != --worktree ] || { number=""; branch=""; }
+    result=$(jq -c --arg c "$cap" --arg s "$file" --arg l "$lines" \
+      --arg base "$([ "$base" = --worktree ] || echo "$base")" --arg number "$number" --arg branch "$branch" '
+      # Refnames may hold shell metacharacters: quote any value that is not plain.
+      def q: if test("^[A-Za-z0-9._/+-]+$") then . else @sh end;
+      def fill($p; $v): if $v == "" then . else gsub("\\{" + $p + "\\}"; $v | q) end;
+      .[$c] = {command: ($l | fill("base"; $base) | fill("number"; $number) | fill("branch"; $branch)), source: $s}' <<<"$result")
+  done
+done
+
+jq -c --arg caps "$capabilities" '. as $r | reduce ($caps | split(" ")[]) as $c ({}; .[$c] = $r[$c])' <<<"$result"
+$found || exit 3
+exit 0

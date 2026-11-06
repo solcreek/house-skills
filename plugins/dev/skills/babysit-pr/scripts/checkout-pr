@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# checkout-pr NUMBER BRANCH
+#
+# Gets this checkout onto pull request NUMBER's head branch BRANCH, or says
+# that a plain checkout is needed. git refuses to check out a branch that
+# another worktree holds, so `gh pr checkout` cannot help there: the PR's head
+# goes onto a local branch of another name, babysit-pr-NUMBER, and every push
+# names the PR's branch explicitly (git push origin HEAD:BRANCH).
+#
+# Prints one JSON line {"local": ..., "branch": BRANCH, "action": ...}:
+#   here       already on BRANCH, or on babysit-pr-NUMBER
+#   elsewhere  BRANCH is checked out in "worktree"; now on babysit-pr-NUMBER at
+#              origin/BRANCH (a babysit-pr-NUMBER left by an earlier run is
+#              switched to as it is, so the caller's fast-forward check applies)
+# Exit codes: 0 one of the above · 5 {"action": "checkout"}: nothing holds
+# BRANCH; check it out the usual way, then run this again · 3 refused: local
+# changes in this worktree · 1 failed (message on stderr) · 2 usage
+set -euo pipefail
+
+usage="usage: checkout-pr NUMBER BRANCH"
+number=${1:?$usage}
+branch=${2:?$usage}
+[[ "$number" =~ ^[0-9]+$ ]] || { echo "checkout-pr: NUMBER must be a PR number" >&2; exit 2; }
+git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo "checkout-pr: $branch is not a branch name" >&2; exit 2; }
+command -v jq >/dev/null || { echo "checkout-pr needs jq" >&2; exit 1; }
+
+local_name="babysit-pr-$number"
+say() { jq -nc --arg l "$1" --arg b "$branch" --arg a "$2" --arg w "${3:-}" \
+  '{local: $l, branch: $b, action: $a} + (if $w == "" then {} else {worktree: $w} end)'; }
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo '{"action": "refused", "why": "this worktree has local changes"}'
+  exit 3
+fi
+current=$(git symbolic-ref --quiet --short HEAD || true)
+if [ "$current" = "$branch" ] || [ "$current" = "$local_name" ]; then
+  say "$current" here
+  exit 0
+fi
+
+top=$(git rev-parse --show-toplevel)
+holder=$(git worktree list --porcelain | awk -v ref="refs/heads/$branch" '
+  /^worktree / { wt = substr($0, 10) }
+  $0 == "branch " ref { print wt; exit }')
+if [ -z "$holder" ] || [ "$holder" = "$top" ]; then
+  echo '{"action": "checkout"}'
+  exit 5
+fi
+
+git fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" \
+  || { echo "checkout-pr: could not fetch $branch from origin" >&2; exit 1; }
+if git rev-parse --verify --quiet "refs/heads/$local_name" >/dev/null; then
+  git switch --quiet "$local_name" || { echo "checkout-pr: could not switch to $local_name" >&2; exit 1; }
+else
+  git switch --quiet --no-track -c "$local_name" "refs/remotes/origin/$branch" \
+    || { echo "checkout-pr: could not create $local_name" >&2; exit 1; }
+fi
+say "$local_name" elsewhere "$holder"

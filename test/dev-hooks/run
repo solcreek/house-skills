@@ -9,12 +9,15 @@ URL=https://github.com/solcreek/x/pull/7
 pass=0
 fail=0
 errf=$(mktemp)
-trap 'rm -f "$errf"' EXIT
+tmp=$(mktemp -d)
+trap 'rm -f "$errf"; rm -rf "$tmp"' EXIT
+mkdir "$tmp/plain"
 
-# payload COMMAND STDOUT — a PostToolUse payload for a Bash call
+# payload COMMAND STDOUT — a PostToolUse payload for a Bash call run in
+# $CWD (default: a directory with no declarations)
 payload() {
-  jq -nc --arg c "$1" --arg o "$2" '{hook_event_name: "PostToolUse", tool_name: "Bash",
-    tool_input: {command: $c}, tool_response: {stdout: $o, stderr: "", interrupted: false}}'
+  jq -nc --arg c "$1" --arg o "$2" --arg cwd "${CWD:-$tmp/plain}" '{hook_event_name: "PostToolUse", tool_name: "Bash",
+    cwd: $cwd, tool_input: {command: $c}, tool_response: {stdout: $o, stderr: "", interrupted: false}}'
 }
 
 # check NAME EXPECTED-URL-OR-EMPTY COMMAND STDOUT [ENV...]
@@ -62,6 +65,21 @@ check "a regex character in an opener is literal" "" "bin/mkk pr open" "$URL" "B
 check "an opener named by its path"           "$URL" "bin/mk pr open" "$URL" "BABYSIT_PR_OPENERS=bin/mk pr open"
 check "gh still works beside openers"         "$URL" "gh pr create --fill" "$URL" "$O"
 check "an empty opener list changes nothing"  "$URL" "gh pr create --fill" "$URL" "BABYSIT_PR_OPENERS= , "
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+repo="$tmp/repo"
+git init -q -b main "$repo"
+printf '%s\n' '# Agents' '' '```babysit-pr-pr-open' 'bin/mk pr open --json' '```' > "$repo/AGENTS.md"
+mkdir "$repo/sub"
+U="-u BABYSIT_PR_OPENERS"
+CWD="$repo" check "a declared pr-open suggests"               "$URL" "bin/mk pr open --fill" "$URL" $U
+CWD="$repo" check "a declared pr-open matches by name"        "$URL" "mk pr open" "$URL" $U
+CWD="$repo" check "a declared pr-open called by another path" "$URL" "./bin/mk pr open" "$URL" $U
+CWD="$repo/sub" check "a declared pr-open from a subdirectory" "$URL" "../bin/mk pr open" "$URL" $U
+CWD="$repo" check "the declared opener stops at its options"   ""     "bin/mk pr view" "$URL" $U
+CWD="$repo" check "gh still works beside a declared opener"    "$URL" "gh pr create --fill" "$URL" $U
+check "no declaration, the wrapper is ignored"                 ""     "bin/mk pr open" "$URL" $U
+CWD="$tmp/missing" check "a cwd that is gone changes nothing"  "$URL" "gh pr create --fill" "$URL" $U
 
 code=0
 echo 'not json' | "$hook" >/dev/null 2>&1 || code=$?
