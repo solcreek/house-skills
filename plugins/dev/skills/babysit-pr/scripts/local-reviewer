@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# local-reviewer BASE SINCE
+# local-reviewer BASE [SINCE]
 #
 # The reviewer a repository declares for step 5, in place of the subagent: the
 # `reviewer` capability of repo-commands, which says where and how a repository
@@ -9,7 +9,8 @@
 #   pnpm -s review:ai --base {since} --format text
 #   ```
 #
-# {since} is replaced with SINCE, the first commit the review must not cover.
+# {since} is replaced with SINCE, the first commit the review must not cover;
+# without SINCE, the merge base of origin/BASE and HEAD.
 # The command exits 0 when the review ran to completion, whatever it found, and
 # non-zero when it did not.
 #
@@ -21,10 +22,10 @@
 #   2  usage
 set -euo pipefail
 
-usage="usage: local-reviewer BASE SINCE"
+usage="usage: local-reviewer BASE [SINCE]"
 base=${1:?$usage}
-since=${2:?$usage}
-[[ "$since" =~ ^[0-9a-f]{7,40}$ ]] || { echo "local-reviewer: SINCE must be a commit sha" >&2; exit 2; }
+since=${2:-}
+[ -z "$since" ] || [[ "$since" =~ ^[0-9a-f]{7,40}$ ]] || { echo "local-reviewer: SINCE must be a commit sha" >&2; exit 2; }
 command -v jq >/dev/null || { echo "local-reviewer needs jq" >&2; exit 1; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -34,6 +35,10 @@ case $rc in
   0 | 3) ;;
   *) exit 1 ;;
 esac
+if [ -z "$since" ]; then
+  since=$(git merge-base "refs/remotes/origin/$base" HEAD) \
+    || { echo "local-reviewer: origin/$base and HEAD share no history" >&2; exit 1; }
+fi
 reviewer=$(jq -c '.reviewer' <<<"$all")
 if [ "$reviewer" = null ]; then
   echo '{"declared": false}'

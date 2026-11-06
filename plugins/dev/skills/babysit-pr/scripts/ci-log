@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# ci-log OWNER/REPO RUN_ID
+#
+# The failed steps' log of workflow run RUN_ID, short enough to read: the last
+# BABYSIT_LOG_LINES lines (default 200) of each failed job, so a second failed
+# job is never cut off by the first one's output. Jobs are read one at a time
+# by id, so matrix jobs sharing a display name keep a budget each. Each job and
+# step is named once on a "== JOB / STEP" line, ahead of its lines, with
+# timestamps and colour codes removed.
+#
+# Exit codes: 0 the log, as text · 3 {"run": RUN_ID, "log": null}: no job has
+# a failed step to show (yet, if the run is still in progress) · 1 could not
+# look: a job failed in a run still in progress (gh gives no job's log before
+# the run ends), the logs expired, or gh failed (message on stderr) · 2 usage
+set -euo pipefail
+
+usage="usage: ci-log OWNER/REPO RUN_ID"
+repo=${1:?$usage}
+run=${2:?$usage}
+[[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "ci-log: OWNER/REPO must look like owner/name" >&2; exit 2; }
+[[ "$run" =~ ^[0-9]+$ ]] || { echo "ci-log: RUN_ID must be a run id" >&2; exit 2; }
+lines=${BABYSIT_LOG_LINES:-200}
+[[ "$lines" =~ ^[1-9][0-9]*$ ]] || { echo "ci-log: BABYSIT_LOG_LINES must be a whole number above 0" >&2; exit 2; }
+command -v jq >/dev/null || { echo "ci-log needs jq" >&2; exit 1; }
+
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+gh run view "$run" -R "$repo" --json jobs > "$dir/jobs" \
+  || { echo "ci-log: could not list the jobs of run $run" >&2; exit 1; }
+ids=$(jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .databaseId' "$dir/jobs") \
+  || { echo "ci-log: could not read the jobs of run $run" >&2; exit 1; }
+
+shown=0
+for id in $ids; do
+  gh run view --job "$id" -R "$repo" --log-failed > "$dir/log" \
+    || { echo "ci-log: could not read the failed log of job $id in run $run" >&2; exit 1; }
+  [ -s "$dir/log" ] || continue
+  [ "$shown" -eq 0 ] || echo
+  shown=$((shown + 1))
+  # gh prints JOB<TAB>STEP<TAB>TIMESTAMP TEXT per line. Only the last keep
+  # lines are printed, so only they are kept: memory follows the budget.
+  LC_ALL=C awk -F '\t' -v keep="$lines" '
+    {
+      text = $0; sub(/^[^\t]*\t[^\t]*\t/, "", text)
+      # A log can open with a byte-order mark, and gh prints ESC as a literal ^[.
+      sub(/^\357\273\277/, "", text)
+      sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z ?/, "", text)
+      gsub(/(\033|\^\[)\[[0-9;]*[A-Za-z]/, "", text)
+      job = $1; n = NR
+      steps[n] = $2; texts[n] = text
+      if (n > keep) { delete steps[n - keep]; delete texts[n - keep] }
+    }
+    END {
+      first = NR - keep + 1
+      if (first < 1) first = 1
+      if (first > 1) printf "(%d earlier lines of %s left out)\n", first - 1, job
+      last = ""
+      for (i = first; i <= NR; i++) {
+        if (steps[i] != last) { print "== " job " / " steps[i]; last = steps[i] }
+        print texts[i]
+      }
+    }' "$dir/log"
+done
+if [ "$shown" -eq 0 ]; then
+  echo "{\"run\": $run, \"log\": null}"
+  exit 3
+fi

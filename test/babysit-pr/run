@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for babysit-pr's state.jq (trust, convergence, the check rollup and
-# code-scanning alerts) and its local-reviewer, review-range and
-# copilot-candidates scripts.
+# code-scanning alerts) and its local-reviewer, repo-commands, checkout-pr,
+# review-range, copilot-candidates, request-copilot, ci-log and wait-pr scripts.
 # Each case edits one base "world" (a PR plus its feedback), feeds it to
 # state.jq in the same page shapes pr-state fetches, and asserts on the output.
 # No network: the git scripts run against scratch repositories, and
@@ -355,6 +355,10 @@ pnpm -s review:ai --base {since} --format text
 $FENCE"
 reviewer "a declaration in AGENTS.md is used, {since} filled in" 0 \
   '.command == "pnpm -s review:ai --base '"$OLD"' --format text" and .source == "AGENTS.md"'
+rc=0; out=$(cd "$repo" && "$lr" main 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && jq -e '.command == "pnpm -s review:ai --base '"$(gitr rev-parse HEAD)"' --format text"' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   without SINCE, {since} is the merge base of origin/BASE and HEAD"; pass=$((pass + 1))
+else echo "FAIL no SINCE: exit $rc: $out"; fail=$((fail + 1)); fi
 printf '%s\n' "$FENCE""babysit-pr-reviewer" "make evil-review {since}" "$FENCE" > "$repo/AGENTS.md"
 gitr commit -qam "the PR changes its reviewer"
 reviewer "the checkout cannot change the reviewer command: origin/BASE decides" 0 '.command | startswith("pnpm -s review:ai")'
@@ -508,11 +512,11 @@ checkout() { # checkout NAME DIR EXIT ASSERTION — runs checkout-pr 7 feat in D
 }
 checkout "nothing holds the branch: exit 5, check it out the usual way" "$co" 5 '.action == "checkout"'
 gito switch -q feat
-checkout "already on the branch: here" "$co" 0 '. == {local: "feat", branch: "feat", action: "here"}'
+checkout "already on the branch: here" "$co" 0 '. == {local: "feat", branch: "feat", action: "here", sync: "same"}'
 gito switch -q main
 gito worktree add -q "$tmp/held" feat
 checkout "another worktree holds the branch: a local branch of another name, at the PR's head" "$co" 0 \
-  '. == {local: "babysit-pr-7", branch: "feat", action: "elsewhere", worktree: "'"$(cd "$tmp/held" && pwd -P)"'"}'
+  '. == {local: "babysit-pr-7", branch: "feat", action: "elsewhere", worktree: "'"$(cd "$tmp/held" && pwd -P)"'", sync: "same"}'
 if [ "$(gito symbolic-ref --short HEAD)" = babysit-pr-7 ] && [ "$(gito rev-parse HEAD)" = "$FEAT" ] \
   && [ -z "$(gito config branch.babysit-pr-7.merge || true)" ]; then
   echo "ok   now on babysit-pr-7 at origin/feat, tracking nothing a bare push could hit"; pass=$((pass + 1))
@@ -522,7 +526,7 @@ gito push -q origin HEAD:feat
 if [ "$(git -C "$origin" rev-parse feat)" = "$(gito rev-parse HEAD)" ]; then
   echo "ok   git push origin HEAD:feat from babysit-pr-7 updates the PR's branch"; pass=$((pass + 1))
 else echo "FAIL the push did not reach feat"; fail=$((fail + 1)); fi
-checkout "on babysit-pr-7 again: here" "$co" 0 '. == {local: "babysit-pr-7", branch: "feat", action: "here"}'
+checkout "on babysit-pr-7 again: here" "$co" 0 '. == {local: "babysit-pr-7", branch: "feat", action: "here", sync: "same"}'
 gito switch -q main
 checkout "a babysit-pr-7 left by an earlier run is reused" "$co" 0 '.local == "babysit-pr-7" and .action == "elsewhere"'
 gito switch -q main
@@ -534,6 +538,35 @@ echo dirty > "$co/x"
 checkout "local changes are refused on the PR's own branch too" "$co" 3 '.action == "refused"'
 gito checkout -q -- x
 gito switch -q main
+other="$tmp/other"
+git clone -q -b feat "$origin" "$other" 2>/dev/null
+pushes() { # pushes NAME — someone else pushes a commit touching NAME to the PR's branch
+  echo "$1" > "$other/$1"
+  git -C "$other" add "$1" && git -C "$other" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm "$1" \
+    && git -C "$other" push -q origin feat
+}
+pushes w
+checkout "behind the PR's branch: fast-forwarded to it" "$co" 0 \
+  '.local == "babysit-pr-7" and .action == "elsewhere" and .sync == "fast-forwarded"'
+if [ "$(gito rev-parse HEAD)" = "$(git -C "$origin" rev-parse feat)" ]; then
+  echo "ok   the fast-forward lands on the PR's head"; pass=$((pass + 1))
+else echo "FAIL not at the PR's head after the fast-forward"; fail=$((fail + 1)); fi
+echo a > "$co/a" && gito add a && gito commit -qm a
+checkout "an earlier run's unpushed commit: ahead, counted, kept" "$co" 0 \
+  '. == {local: "babysit-pr-7", branch: "feat", action: "here", sync: "ahead", ahead: 1}'
+AHEAD=$(gito rev-parse HEAD)
+pushes w2
+checkout "diverged from the PR's branch: refused, nothing moved" "$co" 3 \
+  '.action == "refused" and (.why | test("babysit-pr-7 has diverged from origin/feat"))'
+if [ "$(gito rev-parse HEAD)" = "$AHEAD" ]; then
+  echo "ok   a refused divergence leaves the local branch as it was"; pass=$((pass + 1))
+else echo "FAIL the divergence moved HEAD"; fail=$((fail + 1)); fi
+gito switch -q main
+checkout "a diverged babysit-pr-7 left by an earlier run is refused from another branch too" "$co" 3 \
+  '.action == "refused" and (.why | test("babysit-pr-7 has diverged"))'
+if [ "$(gito symbolic-ref --short HEAD)" = main ]; then
+  echo "ok   that refusal comes before the switch: the checkout stays on main"; pass=$((pass + 1))
+else echo "FAIL the refusal switched to $(gito symbolic-ref --short HEAD)"; fail=$((fail + 1)); fi
 
 echo "== review-range"
 rr="$root/plugins/dev/skills/babysit-pr/scripts/review-range"
@@ -580,6 +613,10 @@ ranged "two merges: a segment before each, the reviewer after the last" "$f1" \
 mb=$(gitg merge-base origin/main feat)
 ranged "the merge base as SINCE needs no split, though merges left it off the first-parent line" "$mb" \
   'del(.reviewer) == {since: "'"$mb"'", segments: [], merges: []}'
+rc=0; out=$(cd "$range" && "$rr" main 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && jq -e 'del(.reviewer) == {since: "'"$mb"'", segments: [], merges: []}' <<<"$out" >/dev/null 2>&1; then
+  echo "ok   without SINCE, the merge base is SINCE: no separate merge-base call"; pass=$((pass + 1))
+else echo "FAIL no SINCE: exit $rc: $out"; fail=$((fail + 1)); fi
 gitg switch -q -c side "$f1"
 s1=$(commit s1)
 gitg switch -q feat
@@ -646,13 +683,25 @@ cc="$root/plugins/dev/skills/babysit-pr/scripts/copilot-candidates"
 SHA=cccccccccccccccccccccccccccccccccccccccc
 mkdir -p "$tmp/bin"
 # A stand-in gh: the runs listing comes from $FAKE_RUNS (unset = the call
-# fails), the log from $FAKE_LOG (unset = expired); every call is recorded.
+# fails), a run's jobs from $FAKE_JOBS, the log from $FAKE_LOG, one job's log
+# from $FAKE_LOG.<job id> (unset or missing = expired); every call is recorded.
 cat > "$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_CALLS"
 case "$1" in
   api) [ -n "${FAKE_RUNS:-}" ] || exit 1; cat "$FAKE_RUNS" ;;
-  run) [ -n "${FAKE_LOG:-}" ] || exit 1; cat "$FAKE_LOG" ;;
+  run)
+    case " $* " in
+      *" --json jobs "*) [ -n "${FAKE_JOBS:-}" ] || exit 1; cat "$FAKE_JOBS" ;;
+      *" --job "*)
+        [ -n "${FAKE_LOG:-}" ] || exit 1
+        # As gh does: no job's log while any job of the run is unfinished.
+        if [ -n "${FAKE_JOBS:-}" ] && jq -e 'any(.jobs[]; (.conclusion // "") == "")' "$FAKE_JOBS" >/dev/null; then
+          echo "run 9 is still in progress; logs will be available when it is complete" >&2; exit 1
+        fi
+        j="$*"; j=${j#*--job }; cat "$FAKE_LOG.${j%% *}" 2>/dev/null ;;
+      *) [ -n "${FAKE_LOG:-}" ] || exit 1; cat "$FAKE_LOG" ;;
+    esac ;;
   *) exit 64 ;;
 esac
 STUB
@@ -765,6 +814,135 @@ else echo "FAIL BABYSIT_COPILOT=never: exit $rc: $out; calls: $(cat "$FAKE_CALLS
 rc=0; out=$(BABYSIT_COPILOT=always "$root/plugins/dev/skills/babysit-pr/scripts/request-copilot" o/r 1 2>&1) || rc=$?
 if [ "$rc" -eq 2 ]; then echo "ok   an unknown BABYSIT_COPILOT value is a usage error"; pass=$((pass + 1))
 else echo "FAIL BABYSIT_COPILOT=always: exit $rc: $out"; fail=$((fail + 1)); fi
+
+echo "== ci-log"
+cl="$root/plugins/dev/skills/babysit-pr/scripts/ci-log"
+logged() { # logged NAME EXIT EXPECTED [LINES] — runs ci-log o/r 9; EXPECTED is its exact output
+  local out rc=0
+  : > "$FAKE_CALLS"
+  out=$(BABYSIT_LOG_LINES=${4:-200} PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && [ "$out" = "$3" ]; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $2:"; printf '%s\n' "$out" | sed 's/^/     | /'; fail=$((fail + 1))
+  fi
+}
+jobs_json() { # jobs_json ID:NAME:CONCLUSION... — writes the run's jobs listing
+  printf '%s\n' "$@" | jq -R 'split(":") | {databaseId: (.[0] | tonumber), name: .[1], conclusion: .[2]}' \
+    | jq -sc '{jobs: .}' > "$tmp/jobs.json"
+}
+jobs_json '1:unit (a):failure' '2:lint:failure' '3:build:success'
+printf '%s\n' \
+  $'unit (a)\tbuild\t2026-10-14T02:46:04.1234567Z first' \
+  $'unit (a)\tbuild\t2026-10-14T02:46:05.1234567Z second' \
+  $'unit (a)\ttest\t2026-10-14T02:46:06.1234567Z \e[31mthird\e[0m' \
+  > "$tmp/ci.log.1"
+printf '%s\n' $'lint\trun lint\t2026-10-14T02:46:07.1234567Z only' > "$tmp/ci.log.2"
+export FAKE_LOG="$tmp/ci.log" FAKE_JOBS="$tmp/jobs.json"
+logged "each failed job keeps its own last lines, named once per step, timestamps and colour gone" 0 \
+"(1 earlier lines of unit (a) left out)
+== unit (a) / build
+second
+== unit (a) / test
+third
+
+== lint / run lint
+only" 2
+if [ "$(cat "$FAKE_CALLS")" = "run view 9 -R o/r --json jobs
+run view --job 1 -R o/r --log-failed
+run view --job 2 -R o/r --log-failed" ]; then
+  echo "ok   that run's jobs are listed, and only the failed ones' logs read, by job id"; pass=$((pass + 1))
+else echo "FAIL gh calls: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
+logged "under the line budget nothing is left out" 0 \
+"== unit (a) / build
+first
+second
+== unit (a) / test
+third
+
+== lint / run lint
+only"
+jobs_json '4:test:failure' '5:test:timed_out'
+printf '%s\n' $'test\trun\t2026-10-14T02:46:04Z a1' $'test\trun\t2026-10-14T02:46:05Z a2' > "$tmp/ci.log.4"
+printf '%s\n' $'test\trun\t2026-10-14T02:46:06Z b1' $'test\trun\t2026-10-14T02:46:07Z b2' > "$tmp/ci.log.5"
+logged "matrix jobs sharing a name keep a budget each" 0 \
+"== test / run
+a1
+a2
+
+== test / run
+b1
+b2" 2
+jobs_json '10:slow:' '2:lint:failure'
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q "still in progress" <<<"$out" && grep -q "could not read the failed log of job 2" <<<"$out"; then
+  echo "ok   a job failed in a run still going: gh gives no log yet, so a failure to look"; pass=$((pass + 1))
+else echo "FAIL failed job in a running run: exit $rc: $out"; fail=$((fail + 1)); fi
+jobs_json '10:slow:'
+logged "in a run still going with no failed job yet, exit 3" 3 '{"run": 9, "log": null}'
+jobs_json '9:ci:failure'
+printf '%s\n' \
+  $'ci\tRun bin/ci\t\xef\xbb\xbf2026-10-09T20:05:48.9224492Z ##[group]Run bin/ci' \
+  $'ci\tRun bin/ci\t2026-10-09T20:05:48.9224935Z ^[[36;1mbin/ci^[[0m' \
+  > "$tmp/ci.log.9"
+logged "as gh prints a real log: the byte-order mark and literal ^[ colour codes go too" 0 \
+"== ci / Run bin/ci
+##[group]Run bin/ci
+bin/ci"
+jobs_json '6:big:failure'
+awk 'BEGIN { for (i = 1; i <= 5000; i++) printf "big\tstep\t2026-10-14T02:46:04Z line %d\n", i }' > "$tmp/ci.log.6"
+logged "a long job is cut to its last lines" 0 \
+"(4998 earlier lines of big left out)
+== big / step
+line 4999
+line 5000" 2
+jobs_json '3:build:success'
+logged "a run with no failed job is exit 3, not an empty log" 3 '{"run": 9, "log": null}'
+jobs_json '7:flaky:failure'
+: > "$tmp/ci.log.7"
+logged "a failed job with no failed step is exit 3 too" 3 '{"run": 9, "log": null}'
+jobs_json '8:gone:failure'
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q "could not read the failed log of job 8" <<<"$out"; then
+  echo "ok   a job log gh cannot read (expired) is a failure to look"; pass=$((pass + 1))
+else echo "FAIL unreadable log: exit $rc: $out"; fail=$((fail + 1)); fi
+unset FAKE_LOG FAKE_JOBS
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q "could not list the jobs" <<<"$out"; then
+  echo "ok   a run gh cannot list is a failure to look"; pass=$((pass + 1))
+else echo "FAIL unlisted run: exit $rc: $out"; fail=$((fail + 1)); fi
+rc=0; out=$("$cl" o/r '9;rm' 2>&1) || rc=$?
+if [ "$rc" -eq 2 ]; then echo "ok   RUN_ID must be a run id"; pass=$((pass + 1))
+else echo "FAIL RUN_ID: exit $rc: $out"; fail=$((fail + 1)); fi
+
+echo "== wait-pr"
+# wait-pr runs the pr-state beside it, so it runs from a copy next to a stand-in
+# that prints $FAKE_STATE.
+mkdir -p "$tmp/wait"
+cp "$root/plugins/dev/skills/babysit-pr/scripts/wait-pr" "$tmp/wait/"
+cat > "$tmp/wait/pr-state" <<'STUB'
+#!/usr/bin/env bash
+cat "$FAKE_STATE"
+STUB
+chmod +x "$tmp/wait/pr-state"
+export FAKE_STATE="$tmp/state.json"
+HERE=$(gitg rev-parse HEAD)
+waited() { # waited NAME EXIT ASSERTION [HEAD_SHA] — runs wait-pr o/r 7 [HEAD_SHA] in the range repo
+  local out rc=0
+  out=$(cd "$range" && BABYSIT_WAIT_TIMEOUT=0 BABYSIT_WAIT_INTERVAL=0 "$tmp/wait/wait-pr" o/r 7 ${4:+"$4"} 2>&1) || rc=$?
+  if [ "$rc" -eq "$2" ] && { [ "$3" = - ] || jq -e "$3" <<<"$out" >/dev/null 2>&1; }; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; echo "     exit $rc, wanted $2: $out"; fail=$((fail + 1))
+  fi
+}
+jq -nc --arg h "$HERE" '{state: "OPEN", head: $h, work: 0, settled: true, done: true}' > "$FAKE_STATE"
+waited "without HEAD_SHA, the checkout's HEAD is the head waited on" 0 '.reason == "settled" and .head == "'"$HERE"'"'
+waited "a HEAD_SHA given is still used as written" 0 '.reason == "moved"' "$OLD"
+jq -nc '{state: "OPEN", head: "'"$OLD"'", work: 0, settled: true, done: true}' > "$FAKE_STATE"
+waited "a PR head other than the checkout's HEAD is moved" 0 '.reason == "moved"'
+waited "a short sha is a usage error, not an instant moved" 2 - "${HERE:0:12}"
+unset FAKE_STATE
 
 echo
 echo "babysit-pr state: $pass passed, $fail failed"

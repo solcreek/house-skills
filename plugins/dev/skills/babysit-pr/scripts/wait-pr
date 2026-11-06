@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# wait-pr OWNER/REPO NUMBER HEAD_SHA   (the full 40-character sha)
+# wait-pr OWNER/REPO NUMBER [HEAD_SHA]   (the full 40-character sha)
+#
+# Without HEAD_SHA, the head waited on is this checkout's HEAD: what the cycle
+# just pushed, or left as it was.
 #
 # Blocks until the PR needs the agent again, then prints one JSON line. Run it
 # with the Bash tool's run_in_background: the polling happens in this process
@@ -17,10 +20,15 @@
 #   2  usage
 set -euo pipefail
 
-usage="usage: wait-pr OWNER/REPO NUMBER HEAD_SHA"
+usage="usage: wait-pr OWNER/REPO NUMBER [HEAD_SHA]"
 repo=${1:?$usage}
 number=${2:?$usage}
-want=${3:?$usage}
+want=${3:-}
+if [ -z "$want" ]; then
+  want=$(git rev-parse --verify --quiet HEAD) || { echo "wait-pr: no HEAD here; pass HEAD_SHA" >&2; exit 2; }
+fi
+# A short sha never equals the PR's head, so it would read as "moved" at once.
+[[ "$want" =~ ^[0-9a-f]{40}$ ]] || { echo "wait-pr: HEAD_SHA must be a full 40-character sha" >&2; exit 2; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 timeout=${BABYSIT_WAIT_TIMEOUT:-1800}
 interval=${BABYSIT_WAIT_INTERVAL:-30}
