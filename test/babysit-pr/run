@@ -683,13 +683,19 @@ cc="$root/plugins/dev/skills/babysit-pr/scripts/copilot-candidates"
 SHA=cccccccccccccccccccccccccccccccccccccccc
 mkdir -p "$tmp/bin"
 # A stand-in gh: the runs listing comes from $FAKE_RUNS (unset = the call
-# fails), the log from $FAKE_LOG (unset = expired); every call is recorded.
+# fails), a run's jobs from $FAKE_JOBS, the log from $FAKE_LOG, one job's log
+# from $FAKE_LOG.<job id> (unset or missing = expired); every call is recorded.
 cat > "$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_CALLS"
 case "$1" in
   api) [ -n "${FAKE_RUNS:-}" ] || exit 1; cat "$FAKE_RUNS" ;;
-  run) [ -n "${FAKE_LOG:-}" ] || exit 1; cat "$FAKE_LOG" ;;
+  run)
+    case " $* " in
+      *" --json jobs "*) [ -n "${FAKE_JOBS:-}" ] || exit 1; cat "$FAKE_JOBS" ;;
+      *" --job "*) [ -n "${FAKE_LOG:-}" ] || exit 1; j="$*"; j=${j#*--job }; cat "$FAKE_LOG.${j%% *}" 2>/dev/null ;;
+      *) [ -n "${FAKE_LOG:-}" ] || exit 1; cat "$FAKE_LOG" ;;
+    esac ;;
   *) exit 64 ;;
 esac
 STUB
@@ -815,13 +821,18 @@ logged() { # logged NAME EXIT EXPECTED [LINES] — runs ci-log o/r 9; EXPECTED i
     echo "FAIL $1"; echo "     exit $rc, wanted $2:"; printf '%s\n' "$out" | sed 's/^/     | /'; fail=$((fail + 1))
   fi
 }
+jobs_json() { # jobs_json ID:NAME:CONCLUSION... — writes the run's jobs listing
+  printf '%s\n' "$@" | jq -R 'split(":") | {databaseId: (.[0] | tonumber), name: .[1], conclusion: .[2]}' \
+    | jq -sc '{jobs: .}' > "$tmp/jobs.json"
+}
+jobs_json '1:unit (a):failure' '2:lint:failure' '3:build:success'
 printf '%s\n' \
   $'unit (a)\tbuild\t2026-10-14T02:46:04.1234567Z first' \
   $'unit (a)\tbuild\t2026-10-14T02:46:05.1234567Z second' \
   $'unit (a)\ttest\t2026-10-14T02:46:06.1234567Z \e[31mthird\e[0m' \
-  $'lint\trun lint\t2026-10-14T02:46:07.1234567Z only' \
-  > "$tmp/ci.log"
-export FAKE_LOG="$tmp/ci.log"
+  > "$tmp/ci.log.1"
+printf '%s\n' $'lint\trun lint\t2026-10-14T02:46:07.1234567Z only' > "$tmp/ci.log.2"
+export FAKE_LOG="$tmp/ci.log" FAKE_JOBS="$tmp/jobs.json"
 logged "each failed job keeps its own last lines, named once per step, timestamps and colour gone" 0 \
 "(1 earlier lines of unit (a) left out)
 == unit (a) / build
@@ -831,9 +842,11 @@ third
 
 == lint / run lint
 only" 2
-if grep -qx 'run view 9 -R o/r --log-failed' "$FAKE_CALLS"; then
-  echo "ok   the failed steps' log of that run, in that repository, is what is read"; pass=$((pass + 1))
-else echo "FAIL gh call: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
+if [ "$(cat "$FAKE_CALLS")" = "run view 9 -R o/r --json jobs
+run view --job 1 -R o/r --log-failed
+run view --job 2 -R o/r --log-failed" ]; then
+  echo "ok   that run's jobs are listed, and only the failed ones' logs read, by job id"; pass=$((pass + 1))
+else echo "FAIL gh calls: $(cat "$FAKE_CALLS")"; fail=$((fail + 1)); fi
 logged "under the line budget nothing is left out" 0 \
 "== unit (a) / build
 first
@@ -843,19 +856,39 @@ third
 
 == lint / run lint
 only"
-awk 'BEGIN { for (i = 1; i <= 5000; i++) printf "big\tstep\t2026-10-14T02:46:04Z line %d\n", i }' > "$tmp/ci.log"
+jobs_json '4:test:failure' '5:test:timed_out'
+printf '%s\n' $'test\trun\t2026-10-14T02:46:04Z a1' $'test\trun\t2026-10-14T02:46:05Z a2' > "$tmp/ci.log.4"
+printf '%s\n' $'test\trun\t2026-10-14T02:46:06Z b1' $'test\trun\t2026-10-14T02:46:07Z b2' > "$tmp/ci.log.5"
+logged "matrix jobs sharing a name keep a budget each" 0 \
+"== test / run
+a1
+a2
+
+== test / run
+b1
+b2" 2
+jobs_json '6:big:failure'
+awk 'BEGIN { for (i = 1; i <= 5000; i++) printf "big\tstep\t2026-10-14T02:46:04Z line %d\n", i }' > "$tmp/ci.log.6"
 logged "a long job is cut to its last lines" 0 \
 "(4998 earlier lines of big left out)
 == big / step
 line 4999
 line 5000" 2
-: > "$tmp/ci.log"
-logged "a run with no failed step is exit 3, not an empty log" 3 '{"run": 9, "log": null}'
-unset FAKE_LOG
+jobs_json '3:build:success'
+logged "a run with no failed job is exit 3, not an empty log" 3 '{"run": 9, "log": null}'
+jobs_json '7:flaky:failure'
+: > "$tmp/ci.log.7"
+logged "a failed job with no failed step is exit 3 too" 3 '{"run": 9, "log": null}'
+jobs_json '8:gone:failure'
 rc=0; out=$(PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
-if [ "$rc" -eq 1 ] && grep -q "could not read" <<<"$out"; then
-  echo "ok   a log gh cannot read (running, expired) is a failure to look"; pass=$((pass + 1))
+if [ "$rc" -eq 1 ] && grep -q "could not read the failed log of job 8" <<<"$out"; then
+  echo "ok   a job log gh cannot read (expired) is a failure to look"; pass=$((pass + 1))
 else echo "FAIL unreadable log: exit $rc: $out"; fail=$((fail + 1)); fi
+unset FAKE_LOG FAKE_JOBS
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q "could not list the jobs" <<<"$out"; then
+  echo "ok   a run gh cannot list is a failure to look"; pass=$((pass + 1))
+else echo "FAIL unlisted run: exit $rc: $out"; fail=$((fail + 1)); fi
 rc=0; out=$("$cl" o/r '9;rm' 2>&1) || rc=$?
 if [ "$rc" -eq 2 ]; then echo "ok   RUN_ID must be a run id"; pass=$((pass + 1))
 else echo "FAIL RUN_ID: exit $rc: $out"; fail=$((fail + 1)); fi
