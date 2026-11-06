@@ -60,23 +60,46 @@ pushes fixes. Copilot reviews are billed per review, so set
 `"BABYSIT_COPILOT": "never"` to stop the skill from asking at all; rulesets
 still trigger their own reviews.
 
-**Your own reviewer.** Before each push the skill reviews its own new
-commits, with a subagent by default. A repository that has its own review
-command declares it in `REVIEW.md`, `AGENTS.md` or `CLAUDE.md` (the first of
-those with one):
+**Your repository's own commands.** A repository that has its own tool for a
+job the skill does declares it, and the skill runs that command instead of
+working one out from the docs. Each declaration is a fenced block named
+`babysit-pr-<capability>` holding one command line, in `REVIEW.md`,
+`AGENTS.md` or `CLAUDE.md` (for each capability, the first of those that
+declares it):
 
 ````markdown
-```babysit-pr-reviewer
-pnpm -s review:ai --base {since} --format text
+```babysit-pr-checks
+bin/mk pr status {number} --wait --json
 ```
 ````
 
-One command line; `{since}` becomes the first commit the review must not
-cover. It exits 0 when the review ran to completion, whatever it found. The
-declaration is read from the base branch, so a PR cannot change which command
-runs. The command itself runs in the PR's checkout, on the PR's code, like the
-build and tests the skill already runs: a PR that changes the scripts behind
-it changes the review too.
+| Capability | The command | Placeholders | Undeclared, the skill uses |
+|---|---|---|---|
+| `checkout` | gets onto the PR's head branch | `{number}`, `{branch}` | `gh pr checkout` |
+| `checks` | prints the PR's checks, waiting while any runs | `{number}` | `pr-state` and `gh` |
+| `ci-failures` | prints the failed checks' error lines | `{number}` | `gh run view --log-failed` |
+| `gate` | runs the pre-push gates (lint, types, ...) on HEAD | `{base}` | nothing |
+| `test` | runs the tests the change since `{since}` affects | `{since}`, `{base}` | the narrowest tests it can find in the docs |
+| `reviewer` | reviews the commits after `{since}`; exits 0 when the review ran to completion, whatever it found | `{since}` (required), `{base}` | a review subagent |
+| `pr-open` | opens a PR (see "After `gh pr create`") | none | `gh pr create` only |
+
+The skill fills in each placeholder, shell-quoted when the value is not plain;
+leave them unquoted. A placeholder the capability does not take, two blocks
+for one capability in a file, or a block that is not one line breaks that
+declaration: the skill falls back for it and says why in its report. Run
+`plugins/dev/skills/babysit-pr/scripts/repo-commands <base>` from a clone to
+see what it reads.
+
+Declarations are read from the base branch, so a PR cannot change which
+command runs. The command itself runs in the PR's checkout, on the PR's code,
+like the build and tests the skill already runs: a PR that changes the scripts
+behind it changes what the command does. The trust filter (`pr-state`) and
+the wait between cycles (`wait-pr`) are never replaced.
+
+**A branch held by another worktree.** When the PR's branch is checked out in
+another `git worktree`, the skill puts the PR's head on a local branch named
+`babysit-pr-<number>` instead. It always pushes with
+`git push origin HEAD:<branch>`, so the local name never matters.
 
 **Code scanning.** The skill reads the PR's open code-scanning alerts, not
 only the ones the code-scanning bot comments on, and treats them as feedback
@@ -86,15 +109,12 @@ once the analysis has finished. It never dismisses an alert.
 in the `dev` plugin has it offer `/dev:babysit-pr <url>`. It only suggests;
 the skill is manual-only and starts when you type it. Set
 `"BABYSIT_SUGGEST": "never"` to turn the suggestion off. A repository that
-opens PRs through its own wrapper names it in `BABYSIT_PR_OPENERS`,
-comma-separated, for example in the repository's `.claude/settings.json`:
-
-```json
-{ "env": { "BABYSIT_PR_OPENERS": "mk pr open" } }
-```
-
-A wrapper called by path (`bin/mk pr open`) matches too; the suggestion still
-needs a PR URL in the command's output.
+opens PRs through its own wrapper declares it as the `pr-open` capability
+above, for example `bin/mk pr open`. The words before the first option or
+placeholder name the opener, its first one matched by name, so `mk pr open`,
+`bin/mk pr open` and `./bin/mk pr open --fill` all count. The hook reads the
+declaration from the checkout the command ran in; the suggestion still needs a
+PR URL in the command's output.
 
 Requirements: `gh` (authenticated), `jq`, `git`.
 

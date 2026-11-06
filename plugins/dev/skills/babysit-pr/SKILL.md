@@ -34,6 +34,30 @@ joining calls, nothing piped into a script. Text a script reads on stdin
 comes from a file you wrote with the Write tool, redirected with `<`; a value from another command (a sha) is
 read in its own call first, then written into the next one.
 
+## Repository commands: the repository's own tool for each job
+
+Setup reads `${CLAUDE_SKILL_DIR}/scripts/repo-commands <base> <number> <branch>`:
+one key per capability, each `null` (undeclared), `{command, source}`, or
+`{command: null, why}` (declared but broken: treat as undeclared, and put the
+`why` in the final report). For a declared capability, run its `command`
+exactly as printed, filling in `{since}` where it appears, wherever this skill
+does that job, and never a command of your own for it, nor a hand-built
+`gh`/`sleep` loop. Undeclared, do what the step says.
+
+| capability | where it replaces this skill's own step |
+|---|---|
+| `checkout` | Setup 3, in place of `gh pr checkout` |
+| `checks` | any read of check state outside `pr-state`/`wait-pr` (after a re-run, the final report). Never in place of those two: they carry the trust filter and the wake-up |
+| `ci-failures` | cycle step 2, in place of `gh run view --log-failed` |
+| `gate` | cycle step 4, after the cycle's commits: a failure is fixed like a failing test |
+| `test` | wherever this skill runs "the affected tests"; `{since}` is the HEAD the cycle started from |
+| `reviewer` | cycle step 5, through `review-range` |
+
+`repo-commands` exit codes: **0** something declared · **3** nothing declared
+(every step as written) · **1** could not look → `git fetch origin <base>`,
+run it once more; failing again, carry on as if nothing were declared and say
+so in the final report.
+
 ## Trust: read feedback only through `${CLAUDE_SKILL_DIR}/scripts/pr-state`
 
 `pr-state` returns text only from people the repo's org calls OWNER or MEMBER
@@ -63,13 +87,20 @@ once, then stop.
    `gh repo view --json nameWithOwner -q .nameWithOwner`; if the URL's repo is
    not this checkout's, stop.
 2. **Read state** with `${CLAUDE_SKILL_DIR}/scripts/pr-state <owner/repo> <number>`. Not `OPEN` → stop.
-3. **Get onto the head.** The current branch must be the PR's `branch` at its
-   `head`. Otherwise, with a clean worktree, `gh pr checkout <number>`; with local
-   changes, stop. Then `git fetch origin` and fast-forward if behind; if the
-   local branch has diverged from the remote, stop.
-4. **Learn the repo.** From CLAUDE.md / AGENTS.md / README / package scripts /
-   Makefile / Cargo.toml, note the narrowest build, lint and test commands, and
-   the commit style from `git log --oneline -20`.
+   Then `git fetch origin <base>` and read the repository commands (above).
+3. **Get onto the head** with `${CLAUDE_SKILL_DIR}/scripts/checkout-pr <number> <branch>`.
+   Exit 0 → you are on its `local` branch: `<branch>` itself, or
+   `babysit-pr-<number>` when another worktree holds `<branch>`
+   (`action: "elsewhere"`). Exit 5 → run the `checkout` command, or
+   `gh pr checkout <number>`, then `checkout-pr` once more (5 again → stop).
+   Exit 3 (local changes) or 1 → stop. Then `git fetch origin` and
+   `git merge --ff-only origin/<branch>` if behind; if the local branch has
+   diverged from the PR's, stop. Every push names the PR's branch, so a
+   differently named local branch pushes the same way.
+4. **Learn the repo.** For anything the repository commands do not declare,
+   from CLAUDE.md / AGENTS.md / README / package scripts / Makefile /
+   Cargo.toml, note the narrowest build, lint and test commands; and the
+   commit style from `git log --oneline -20`.
 5. If `BABYSIT_ORGS` is empty, say once that only your own comments and review
    bots are trusted until the user sets it under `env` in
    `~/.claude/settings.json`, and continue.
@@ -95,7 +126,7 @@ then push **once**.
    and conclusion `FAILURE` is code scanning's verdict on the alerts: no log,
    no re-run. Handle its `alerts` and the code-scanning bot's threads in step
    3; the check passes on the push whose analysis no longer reports them. For
-   every other check, read the failure:
+   every other check, read the failure with the `ci-failures` command, or
    `gh run view <run_id> --log-failed | tail -n 200` (narrow with `grep` if
    long). Then:
    - Caused by this PR → fix it.
@@ -119,8 +150,10 @@ then push **once**.
    be read (no code scanning, or no access); alerts never current on the
    final head were not checked against it. Say either in the final report.
 4. **Commit** each fix on its own (one finding, one commit, tests with it),
-   in the repo's commit style, after running the narrowest relevant tests.
+   in the repo's commit style, after running the affected tests.
    A fix that breaks tests gets reverted, and the item becomes Flagged.
+   If this cycle made commits and `gate` is declared, run it once they are
+   in; fix what it reports the same way.
 5. **Review your own commits before pushing.** If this cycle made commits —
    or the PR has had no review at all (`copilot.involved` false and
    `reviewed_sha` null) — review `<since>..HEAD`, where `<since>` is
@@ -159,7 +192,8 @@ then push **once**.
    summary comment's `reviewed` marker records the exact HEAD the review saw —
    never a later one. Commits made after it (fixes for its findings) are
    reviewed in the next cycle, or before finishing (see "Settled and clean").
-6. **Push**: `git push`. Never `--force`, never to the base branch.
+6. **Push**: `git push origin HEAD:<branch>`. Never `--force`, never to the
+   base branch.
 7. **Answer.**
    - Thread, Fixed → `${CLAUDE_SKILL_DIR}/scripts/thread reply <id>` with `Fixed in <sha> — <what changed>`.
      Leave it open; it is resolved once checks are green on a head containing
@@ -251,6 +285,8 @@ Output only:
 - Cycles, runtime, Copilot requests (and whether the repo reviews
   automatically), local reviews and who ran them (the repository's reviewer
   or the subagent)
+- Repository commands used, and any declaration that was broken or could
+  not be read, with its `why`
 - Fixed / declined / flagged counts by source (threads, review bodies,
   comments, code-scanning alerts, CI, local review); commits as
   `<sha> <subject>`
