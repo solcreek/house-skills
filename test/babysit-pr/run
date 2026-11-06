@@ -867,6 +867,12 @@ a2
 == test / run
 b1
 b2" 2
+jobs_json '10:slow:' '2:lint:failure'
+logged "in a run still going, the jobs already failed are shown, the running ones skipped" 0 \
+"== lint / run lint
+only"
+jobs_json '10:slow:'
+logged "in a run still going with no failed job yet, exit 3" 3 '{"run": 9, "log": null}'
 jobs_json '9:ci:failure'
 printf '%s\n' \
   $'ci\tRun bin/ci\t\xef\xbb\xbf2026-10-09T20:05:48.9224492Z ##[group]Run bin/ci' \
