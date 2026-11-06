@@ -129,8 +129,10 @@ then push **once**.
    3; the check passes on the push whose analysis no longer reports them. For
    every other check, read the failure with the `ci-failures` command, or
    `${CLAUDE_SKILL_DIR}/scripts/ci-log <owner/repo> <run_id>`: the last
-   lines of each failed job. Its exit 3 (no failed step) or 1 (the log
-   cannot be read) leaves nothing to fix: judge the check by its `url`. Then:
+   lines of each failed job. Exit 1 while the check's run is still going
+   (gh gives no log until the whole run ends) → read it next cycle. Any
+   other exit 3 (no failed step) or 1 (the log expired) leaves nothing to
+   fix: judge the check by its `url`. Then:
    - Caused by this PR → fix it.
    - Flaky or infrastructure (runner lost, network, registry timeout, a test
      the diff cannot reach) → `gh run rerun <run_id> --failed`, **once per

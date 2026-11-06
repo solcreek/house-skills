@@ -8,11 +8,10 @@
 # step is named once on a "== JOB / STEP" line, ahead of its lines, with
 # timestamps and colour codes removed.
 #
-# A run still in progress shows the jobs that have already failed.
-#
 # Exit codes: 0 the log, as text · 3 {"run": RUN_ID, "log": null}: no job has
 # a failed step to show (yet, if the run is still in progress) · 1 could not
-# look: the logs expired, or gh failed (message on stderr) · 2 usage
+# look: a job failed in a run still in progress (gh gives no job's log before
+# the run ends), the logs expired, or gh failed (message on stderr) · 2 usage
 set -euo pipefail
 
 usage="usage: ci-log OWNER/REPO RUN_ID"

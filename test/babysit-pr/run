@@ -693,7 +693,13 @@ case "$1" in
   run)
     case " $* " in
       *" --json jobs "*) [ -n "${FAKE_JOBS:-}" ] || exit 1; cat "$FAKE_JOBS" ;;
-      *" --job "*) [ -n "${FAKE_LOG:-}" ] || exit 1; j="$*"; j=${j#*--job }; cat "$FAKE_LOG.${j%% *}" 2>/dev/null ;;
+      *" --job "*)
+        [ -n "${FAKE_LOG:-}" ] || exit 1
+        # As gh does: no job's log while any job of the run is unfinished.
+        if [ -n "${FAKE_JOBS:-}" ] && jq -e 'any(.jobs[]; (.conclusion // "") == "")' "$FAKE_JOBS" >/dev/null; then
+          echo "run 9 is still in progress; logs will be available when it is complete" >&2; exit 1
+        fi
+        j="$*"; j=${j#*--job }; cat "$FAKE_LOG.${j%% *}" 2>/dev/null ;;
       *) [ -n "${FAKE_LOG:-}" ] || exit 1; cat "$FAKE_LOG" ;;
     esac ;;
   *) exit 64 ;;
@@ -868,9 +874,10 @@ a2
 b1
 b2" 2
 jobs_json '10:slow:' '2:lint:failure'
-logged "in a run still going, the jobs already failed are shown, the running ones skipped" 0 \
-"== lint / run lint
-only"
+rc=0; out=$(PATH="$tmp/bin:$PATH" "$cl" o/r 9 2>&1) || rc=$?
+if [ "$rc" -eq 1 ] && grep -q "still in progress" <<<"$out" && grep -q "could not read the failed log of job 2" <<<"$out"; then
+  echo "ok   a job failed in a run still going: gh gives no log yet, so a failure to look"; pass=$((pass + 1))
+else echo "FAIL failed job in a running run: exit $rc: $out"; fail=$((fail + 1)); fi
 jobs_json '10:slow:'
 logged "in a run still going with no failed job yet, exit 3" 3 '{"run": 9, "log": null}'
 jobs_json '9:ci:failure'
